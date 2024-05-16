@@ -1,4 +1,18 @@
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+use serde::{Deserialize, Serialize};
+
+#[derive(
+    Default,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+)]
 pub struct Coordinate {
     pub x: usize,
     pub y: usize,
@@ -10,7 +24,7 @@ impl Coordinate {
     }
 }
 
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Line {
     pub start: Coordinate,
     pub end: Coordinate,
@@ -18,6 +32,13 @@ pub struct Line {
 
 impl Line {
     pub fn new(start: Coordinate, end: Coordinate) -> Self {
-        Self { start, end }
+        if start < end {
+            Self { start, end }
+        } else {
+            Self {
+                start: end,
+                end: start,
+            }
+        }
     }
 }

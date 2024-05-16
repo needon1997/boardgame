@@ -1,6 +1,6 @@
-use super::element::{Point, Tile, TileKind};
+use super::element::{Point, TileKind};
 use crate::{
-    catan::element::DevCard,
+    catan::element::{DevCard, Tile},
     common::element::{Coordinate, Line},
 };
 use rand::{prelude::SliceRandom, thread_rng};
@@ -136,6 +136,11 @@ impl CatanData {
                     let kind = tile_kind.pop().unwrap();
                     tiles[i][j].set_kind(kind);
                     valid_dice_coord.push(Coordinate { x: i, y: j });
+                    if kind == TileKind::Dessert {
+                        robber = Coordinate { x: i, y: j };
+                        let entry = dics_map.entry(7).or_insert(Vec::new());
+                        entry.push(robber);
+                    }
                 }
             }
         }
@@ -150,12 +155,16 @@ impl CatanData {
         for i in 0..DICE_COUNT.len() {
             let mut dice = DICE_COUNT[i];
             while dice > 0 {
+                if i == 7 {
+                    break;
+                }
                 let c = valid_dice_coord.pop().unwrap();
+                if c == robber {
+                    continue;
+                }
                 let entry = dics_map.entry(i).or_insert(Vec::new());
                 entry.push(c);
-                if i == 7 {
-                    robber = c;
-                }
+                tiles[c.x][c.y].set_number(i);
                 dice -= 1;
             }
         }
