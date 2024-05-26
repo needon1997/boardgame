@@ -634,7 +634,7 @@ pub struct SelectRobber {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OfferResources {
     pub player: usize,
-    pub count: usize,
+    pub count: isize,
     pub kind: TileKind,
 }
 
@@ -649,7 +649,7 @@ pub enum GameAct {
     YearOfPlenty(TileKind, TileKind),
     TradeRequest(TradeRequest),
     TradeResponse(TradeResponse),
-    TradeConfirm(usize),
+    TradeConfirm(Option<usize>),
     SelectRobber((Option<usize>, Coordinate)),
     StealResource(usize),
     EndTurn,
@@ -679,8 +679,7 @@ pub enum GameMsg {
     PlayerSelectRobber(SelectRobber),
     PlayerTradeRequest((usize, TradeRequest)),
     PlayerTradeResponse((usize, TradeResponse)),
-    PlayerTradeConfirm((usize, TradeResponse)),
-    PlayerTrade(Trade),
+    PlayerTrade(Option<Trade>),
     PlayerOfferResources(OfferResources),
     PlayerEndTurn(usize),
 }

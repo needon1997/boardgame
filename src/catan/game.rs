@@ -15,7 +15,7 @@ pub(super) enum GameUpdate {
     BuildCity(BuildCity),
     BuyDevelopmentCard(BuyDevelopmentCard),
     UseDevelopmentCard(UseDevelopmentCard),
-    Trade(Trade),
+    Trade(Option<Trade>),
     SelectRobber(SelectRobber),
 }
 
@@ -290,14 +290,19 @@ where
         self.players[buy.player].base.resources[TileKind::Grain as usize] -= 1;
         self.players[buy.player].base.resources[TileKind::Wool as usize] -= 1;
         self.players[buy.player].base.resources[TileKind::Stone as usize] -= 1;
-        let card = self.dev_cards.pop().unwrap();
-        self.players[buy.player].base.cards[card as usize] += 1;
-        self.broadcast
-            .push(GameMsg::PlayerBuyDevelopmentCard(buy.clone()));
-        buy.card = Some(card);
-        self.players[buy.player]
-            .message
-            .push(GameMsg::PlayerBuyDevelopmentCard(buy));
+        match self.dev_cards.pop() {
+            Some(card) => {
+                self.players[buy.player].base.cards[card as usize] += 1;
+                self.broadcast
+                    .push(GameMsg::PlayerBuyDevelopmentCard(buy.clone()));
+                buy.card = Some(card);
+                self.players[buy.player]
+                    .message
+                    .push(GameMsg::PlayerBuyDevelopmentCard(buy));
+            },
+            None => {},
+        }
+
         Ok(())
     }
 
@@ -428,7 +433,11 @@ where
             self.players[offer.player].name(),
             offer,
         );
-        self.players[offer.player].base.resources[offer.kind as usize] += offer.count;
+        self.players[offer.player].base.resources[offer.kind as usize] =
+            (self.players[offer.player].base.resources[offer.kind as usize] as isize
+                + offer.count)
+                .min(0)
+                .max(20) as usize;
         self.broadcast.push(GameMsg::PlayerOfferResources(offer));
     }
 
@@ -479,14 +488,22 @@ where
                         if !available.is_empty() {
                             let kind =
                                 available[rand::random::<usize>() % available.len()];
-                            self.players[target].base.resources[kind] -= 1;
-                            self.players[select_robber.player].base.resources[kind] += 1;
                             println!(
                                 "{} stole a {:?} from {}",
                                 self.players[select_robber.player].name(),
                                 kind,
                                 self.players[target].name()
                             );
+                            self.update(GameUpdate::OfferResources(OfferResources {
+                                player: target,
+                                count: -1,
+                                kind: TileKind::try_from(kind as u8).unwrap(),
+                            }));
+                            self.update(GameUpdate::OfferResources(OfferResources {
+                                player: select_robber.player,
+                                count: 1,
+                                kind: TileKind::try_from(kind as u8).unwrap(),
+                            }));
                         } else {
                             return Err("No resource to steal".to_owned());
                         }
@@ -648,16 +665,23 @@ where
         Ok(())
     }
 
-    fn do_trade(&mut self, trade: Trade) -> Result<(), String> {
-        match trade.request.target() {
-            TradeTarget::Player => {
-                self.do_player_trade(trade.clone())?;
+    fn do_trade(&mut self, trade: Option<Trade>) -> Result<(), String> {
+        match trade {
+            Some(trade) => {
+                match trade.request.target() {
+                    TradeTarget::Player => {
+                        self.do_player_trade(trade.clone())?;
+                    },
+                    _ => {
+                        self.do_local_trade(trade.clone())?;
+                    },
+                };
+                self.broadcast.push(GameMsg::PlayerTrade(Some(trade)));
             },
-            _ => {
-                self.do_local_trade(trade.clone())?;
+            None => {
+                self.broadcast.push(GameMsg::PlayerTrade(None));
             },
         }
-        self.broadcast.push(GameMsg::PlayerTrade(trade));
         Ok(())
     }
 
@@ -833,28 +857,35 @@ where
                                 .get_action()
                                 .await;
                             match action {
-                                GameAct::TradeConfirm(i) => {
-                                    if i == self.current_player || i > self.players.len()
-                                    {
-                                        panic!("Invalid player index");
-                                    }
-                                    if responses[i] == TradeResponse::Accept {
-                                    } else {
-                                        panic!("Trade rejected by other player");
-                                    }
-                                    to = i;
+                                GameAct::TradeConfirm(i) => match i {
+                                    Some(i) => {
+                                        if i == self.current_player
+                                            || i > self.players.len()
+                                        {
+                                            panic!("Invalid player index");
+                                        }
+                                        if responses[i] == TradeResponse::Accept {
+                                        } else {
+                                            panic!("Trade rejected by other player");
+                                        }
+                                        to = i;
+                                        self.update(GameUpdate::Trade(Some(Trade {
+                                            from: self.current_player,
+                                            to,
+                                            request: trade_request.clone(),
+                                        })))
+                                        .unwrap();
+                                    },
+                                    None => {
+                                        println!("Trade rejected by player");
+                                        self.update(GameUpdate::Trade(None)).unwrap();
+                                    },
                                 },
                                 _ => {
-                                    panic!("Invalid trade response");
+                                    panic!("Invalid trade response: {:?}", action);
                                 },
                             }
                         }
-                        self.update(GameUpdate::Trade(Trade {
-                            from: self.current_player,
-                            to,
-                            request: trade_request.clone(),
-                        }))
-                        .unwrap();
                     }
                 },
                 GameAct::EndTurn => {
@@ -887,7 +918,7 @@ where
             self.players[i].send_message(msg).await;
         }
 
-        for i in (0..self.players.len()).chain((0..self.players.len()).rev()) {
+        for i in (0..self.players.len()) {
             self.broadcast(GameMsg::PlayerInit(i)).await;
             let action = self.players[i].get_action().await;
             match action {
@@ -896,6 +927,50 @@ where
                         player: i,
                         point: coord,
                     }));
+                },
+                _ => {
+                    panic!("Invalid action")
+                },
+            }
+            self.flush_messages().await;
+            let action = self.players[i].get_action().await;
+            match action {
+                GameAct::BuildRoad(from, to) => {
+                    let road = if from.x == to.x {
+                        Line::new(from, to)
+                    } else {
+                        Line::new(to, from)
+                    };
+                    self.update(GameUpdate::BuildRoad(BuildRoad { player: i, road }));
+                },
+                _ => {
+                    panic!("Invalid action")
+                },
+            }
+            self.flush_messages().await;
+        }
+
+        for i in (0..self.players.len()).rev() {
+            self.broadcast(GameMsg::PlayerInit(i)).await;
+            let action = self.players[i].get_action().await;
+            match action {
+                GameAct::BuildSettlement(coord) => {
+                    self.update(GameUpdate::BuildSettlement(BuildSettlement {
+                        player: i,
+                        point: coord,
+                    }));
+                    let tiles = self.inner.ponint_get_tile(coord);
+                    for tile in tiles {
+                        if let Some(tile) = tile {
+                            if self.inner.tile(tile).is_resource() {
+                                self.update(GameUpdate::OfferResources(OfferResources {
+                                    player: i,
+                                    count: 1,
+                                    kind: self.inner.tile(tile).kind(),
+                                }));
+                            }
+                        }
+                    }
                 },
                 _ => {
                     panic!("Invalid action")

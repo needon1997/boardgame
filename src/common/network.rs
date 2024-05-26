@@ -32,7 +32,7 @@ impl bevy_simplenet::ChannelPack for NetworkChannel {
 pub fn new_server() -> NetworkServer {
     bevy_simplenet::ServerFactory::<NetworkChannel>::new("network").new_server(
         enfync::builtin::native::TokioHandle::default(),
-        "127.0.0.1:48888",
+        "0.0.0.0:48888",
         bevy_simplenet::AcceptorConfig::Default,
         bevy_simplenet::Authenticator::None,
         bevy_simplenet::ServerConfig {
@@ -45,7 +45,7 @@ pub fn new_server() -> NetworkServer {
 pub fn new_client() -> NetworkClient {
     bevy_simplenet::ClientFactory::<NetworkChannel>::new("network").new_client(
         enfync::builtin::Handle::default(), //automatically selects native/WASM runtime
-        url::Url::parse("ws://127.0.0.1:48888/ws").unwrap(),
+        url::Url::parse("ws://192.168.1.74:48888/ws").unwrap(),
         bevy_simplenet::AuthRequest::None {
             client_id: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

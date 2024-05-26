@@ -9,7 +9,7 @@ edition = "2021"
 bevy = { version = "0.13.0" }
 bevy_consumable_event = "0.3.0"
 bevy_framepace = "0.15"
-bevy_simplenet = { git = "https://github.com/UkoeHB/bevy_simplenet.git" }
+bevy_simplenet = { git = "https://github.com/needon1997/bevy_simplenet.git" }
 bevy_vector_shapes = "0.7.0"
 enfync = "0.1"
 rand = "0.8.4"
