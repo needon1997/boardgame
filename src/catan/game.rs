@@ -1,5 +1,7 @@
 use std::{collections::HashMap, sync::Arc, vec};
 
+use bevy::utils::HashSet;
+
 use crate::common::{
     element::{Coordinate, Line},
     player::{GamePlayer, GamePlayerAction, GamePlayerMessage},
@@ -534,10 +536,10 @@ where
         }
 
         for (kind, count) in trade.request.to() {
-            if self.players[trade.to].base.resources[*kind as usize] < *count {
+            if self.players[trade.to.unwrap()].base.resources[*kind as usize] < *count {
                 return Err(format!(
                     "{} Not enough resources",
-                    self.players[trade.to].name()
+                    self.players[trade.to.unwrap()].name()
                 ));
             }
         }
@@ -545,115 +547,24 @@ where
         println!(
             "{} trade with {}",
             self.players[trade.from].name(),
-            self.players[trade.to].name()
+            self.players[trade.to.unwrap()].name()
         );
         for (kind, count) in trade.request.from() {
             self.players[trade.from].base.resources[*kind as usize] -= count;
-            self.players[trade.to].base.resources[*kind as usize] += count;
+            self.players[trade.to.unwrap()].base.resources[*kind as usize] += count;
         }
 
         for (kind, count) in trade.request.to() {
             self.players[trade.from].base.resources[*kind as usize] += count;
-            self.players[trade.to].base.resources[*kind as usize] -= count;
+            self.players[trade.to.unwrap()].base.resources[*kind as usize] -= count;
         }
         Ok(())
     }
 
     fn do_local_trade(&mut self, trade: Trade) -> Result<(), String> {
-        let mut valid_count = 0;
-        let mut request_count = 0;
-        let player = self.players.get_mut(trade.from).unwrap();
-
-        match trade.request.target() {
-            TradeTarget::Player => {
-                unreachable!("Player to player trade not reachable")
-            },
-            TradeTarget::Bank => {
-                for (kind, count) in trade.request.from() {
-                    if *count < 4 {
-                        return Err(format!("Not enough {:?} to trade with bank", kind));
-                    }
-                    if *count % 4 != 0 {
-                        return Err("Trade count must be a multiple of 4".to_owned());
-                    }
-
-                    if player.base.resources[*kind as usize] < *count {
-                        return Err("Not enough resources".to_owned());
-                    }
-
-                    valid_count += count / 4;
-                }
-            },
-            TradeTarget::Harbor(harbor_kind) => {
-                let mut harbor = None;
-                for (line, kind) in self.inner.harbors().iter() {
-                    if self.inner.point(line.start).owner() != Some(trade.from)
-                        && self.inner.point(line.end).owner() != Some(trade.from)
-                    {
-                        continue;
-                    } else {
-                        harbor = Some(*kind);
-                        break;
-                    }
-                }
-
-                if harbor.is_none() {
-                    return Err("No harbor owned".to_owned());
-                }
-
-                match harbor_kind {
-                    TileKind::Dessert => {
-                        panic!("Invalid trade with dessert harbour");
-                    },
-                    TileKind::Empty => {
-                        for (kind, count) in trade.request.from() {
-                            if *count < 3 {
-                                return Err(format!(
-                                    "Not enough {:?} to trade with {:?} harbour",
-                                    kind, harbor_kind
-                                ));
-                            }
-                            if *count % 3 != 0 {
-                                return Err(
-                                    "Trade count must be a multiple of 3".to_owned()
-                                );
-                            }
-
-                            if player.base.resources[*kind as usize] < *count {
-                                return Err("Not enough resources".to_owned());
-                            }
-
-                            valid_count += count / 3;
-                        }
-                    },
-                    _ => {
-                        for (kind, count) in trade.request.from() {
-                            if *kind != *harbor_kind {
-                                return Err("Invalid trade with harbour".to_owned());
-                            }
-                            if *count % 2 != 0 {
-                                return Err(
-                                    "Trade count must be a multiple of 2".to_owned()
-                                );
-                            }
-
-                            if player.base.resources[*kind as usize] < *count {
-                                return Err("Not enough resources".to_owned());
-                            }
-
-                            valid_count += count / 2;
-                        }
-                    },
-                }
-            },
-        };
-        for (_, count) in trade.request.to() {
-            request_count += count;
-        }
-
-        if valid_count != request_count {
-            return Err("Invalid trade request".to_owned());
-        }
+        self.inner
+            .check_valid_local_trade(&trade, &self.players[trade.from].base)?;
+        let player = &mut self.players[trade.from];
 
         for (kind, count) in trade.request.from() {
             player.base.resources[*kind as usize] -= count;
@@ -715,9 +626,11 @@ where
     }
 
     async fn roll_dice(&mut self) {
-        let dice = 1 + rand::random::<usize>() % 6 + 1 + rand::random::<usize>() % 6;
-        self.broadcast(GameMsg::PlayerRollDice(dice)).await;
-        if dice == 7 {
+        let dice1 = (1 + rand::random::<usize>() % 6) as u8;
+        let dice2 = (1 + rand::random::<usize>() % 6) as u8;
+        self.broadcast(GameMsg::PlayerRollDice((dice1, dice2)))
+            .await;
+        if dice1 + dice2 == 7 {
             match self.players[self.current_player].get_action().await {
                 GameAct::SelectRobber((target, coord)) => {
                     self.update(GameUpdate::SelectRobber(SelectRobber {
@@ -732,7 +645,8 @@ where
                 },
             }
         } else {
-            self.update(GameUpdate::HitDice(dice)).unwrap();
+            self.update(GameUpdate::HitDice((dice1 + dice2) as usize))
+                .unwrap();
         }
         self.flush_messages().await;
     }
@@ -868,10 +782,9 @@ where
                                         } else {
                                             panic!("Trade rejected by other player");
                                         }
-                                        to = i;
                                         self.update(GameUpdate::Trade(Some(Trade {
                                             from: self.current_player,
-                                            to,
+                                            to: Some(i),
                                             request: trade_request.clone(),
                                         })))
                                         .unwrap();
@@ -885,6 +798,13 @@ where
                                     panic!("Invalid trade response: {:?}", action);
                                 },
                             }
+                        } else {
+                            self.update(GameUpdate::Trade(Some(Trade {
+                                from: self.current_player,
+                                to: None,
+                                request: trade_request.clone(),
+                            })))
+                            .unwrap();
                         }
                     }
                 },

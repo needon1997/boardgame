@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -385,6 +388,85 @@ impl CatanCommon {
         }
         tiles
     }
+
+    pub fn check_valid_local_trade(
+        &self, trade: &Trade, player: &PlayerCommon,
+    ) -> Result<(), String> {
+        let mut valid_count = 0;
+        let mut request_count = 0;
+
+        match trade.request.target() {
+            TradeTarget::Player => {
+                unreachable!("Player to player trade not reachable")
+            },
+            TradeTarget::Bank => {
+                for (kind, count) in trade.request.from() {
+                    if *count < 4 {
+                        return Err(format!("Not enough {:?} to trade with bank", kind));
+                    }
+                    if *count % 4 != 0 {
+                        return Err("Trade count must be a multiple of 4".to_owned());
+                    }
+
+                    if player.resources[*kind as usize] < *count {
+                        return Err("Not enough resources".to_owned());
+                    }
+
+                    valid_count += count / 4;
+                }
+            },
+            TradeTarget::Harbor => {
+                let mut harbor = HashSet::new();
+                for (line, kind) in self.harbors().iter() {
+                    if self.point(line.start).owner() != Some(trade.from)
+                        && self.point(line.end).owner() != Some(trade.from)
+                    {
+                        continue;
+                    } else {
+                        harbor.insert(*kind);
+                        break;
+                    }
+                }
+
+                if harbor.is_empty() {
+                    return Err("No harbor owned".to_owned());
+                }
+                for (kind, count) in trade.request.from() {
+                    if harbor.contains(kind) {
+                        if *count % 2 != 0 {
+                            return Err("Trade count must be a multiple of 2".to_owned());
+                        }
+
+                        if player.resources[*kind as usize] < *count {
+                            return Err("Not enough resources".to_owned());
+                        }
+
+                        valid_count += count / 2;
+                    } else if harbor.contains(&TileKind::Empty) {
+                        if *count % 3 != 0 {
+                            return Err("Trade count must be a multiple of 3".to_owned());
+                        }
+
+                        if player.resources[*kind as usize] < *count {
+                            return Err("Not enough resources".to_owned());
+                        }
+
+                        valid_count += count / 3;
+                    } else {
+                        return Err("Invalid trade with harbour".to_owned());
+                    }
+                }
+            },
+        };
+        for (_, count) in trade.request.to() {
+            request_count += count;
+        }
+
+        if valid_count != request_count {
+            return Err("Invalid trade request".to_owned());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -514,7 +596,7 @@ impl PlayerCommon {
 pub enum TradeTarget {
     Player,
     Bank,
-    Harbor(TileKind),
+    Harbor,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -620,7 +702,7 @@ pub struct UseDevelopmentCard {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Trade {
     pub from: usize,
-    pub to: usize,
+    pub to: Option<usize>,
     pub request: TradeRequest,
 }
 
@@ -670,7 +752,7 @@ pub enum GameMsg {
     GameStart(GameStart),
     PlayerInit(usize),
     PlayerTurn(usize),
-    PlayerRollDice(usize),
+    PlayerRollDice((u8, u8)),
     PlayerBuildRoad(BuildRoad),
     PlayerBuildSettlement(BuildSettlement),
     PlayerBuildCity(BuildCity),

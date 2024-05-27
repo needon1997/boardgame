@@ -16,7 +16,7 @@ use bevy_vector_shapes::prelude::*;
 use crate::{
     catan::element::{
         CatanCommon, DevCard, DevelopmentCard, GameAct, GameMsg, GameStart, PlayerCommon,
-        SelectRobber, Tile, TileKind, TradeRequest, TradeResponse, TradeTarget,
+        SelectRobber, Tile, TileKind, Trade, TradeRequest, TradeResponse, TradeTarget,
     },
     common::{
         element::{Coordinate, Line},
@@ -71,6 +71,7 @@ struct Catan {
     selected_yop: Option<TileKind>,
     road_building: Option<Line>,
     used_card: bool,
+    dice: (u8, u8),
 }
 
 impl Catan {
@@ -126,6 +127,7 @@ impl Catan {
             selected_yop: None,
             road_building: None,
             used_card: false,
+            dice: (1, 1),
         }
     }
 
@@ -1137,11 +1139,13 @@ fn intialize_game(
 
 fn draw_player_board(
     mut painter: ShapePainter, mut catan: ResMut<Catan>, windows: Query<&Window>,
+    img_store: Res<ImageStore>,
 ) {
     for window in windows.iter() {
         painter.color = Color::rgb(0.0, 0.0, 0.0);
         let player_card_y_size = window.height() * 0.1;
-        let player_card_x_size = window.width() / catan.players.len() as f32;
+        let player_card_x_size =
+            (window.width() - window.height() * 0.2) / catan.players.len() as f32;
         let board_translate = Vec3 {
             x: 0.0,
             y: -window.height() * 0.25,
@@ -1150,15 +1154,36 @@ fn draw_player_board(
 
         painter.translate(board_translate);
         painter.with_children(|child_painter| {
+            child_painter.translate(Vec3 {
+                x: -window.width() / 2. + player_card_y_size / 2.,
+                y: 0.0,
+                z: 0.1,
+            });
+            child_painter.image(
+                img_store.dice_img[catan.dice.0 as usize - 1].clone(),
+                Vec2 {
+                    x: player_card_y_size,
+                    y: player_card_y_size,
+                },
+            );
+            child_painter.translate(Vec3 {
+                x: player_card_y_size,
+                y: 0.0,
+                z: 0.1,
+            });
+            child_painter.image(
+                img_store.dice_img[catan.dice.1 as usize - 1].clone(),
+                Vec2 {
+                    x: player_card_y_size,
+                    y: player_card_y_size,
+                },
+            );
             let config = child_painter.config().clone();
-
             for i in 0..catan.players.len() {
                 child_painter.set_config(config.clone());
                 child_painter.color = Color::rgb(0.5, 0.5, 0.2);
                 child_painter.translate(Vec3 {
-                    x: -window.width() / 2.
-                        + player_card_x_size / 2.
-                        + player_card_x_size * i as f32,
+                    x: player_card_x_size / 2. + player_card_x_size * i as f32,
                     y: 0.0,
                     z: 0.1,
                 });
@@ -1222,6 +1247,13 @@ fn draw_menu(
                 spawn_children.set_config(config.clone());
                 spawn_children.translate(Vec3 {
                     x: xoffset + operation_size * i as f32,
+                    y: 0.0,
+                    z: 0.1,
+                });
+                spawn_children.color = Color::rgb(0.2, 0.5, 0.5);
+                spawn_children.rect(size);
+                spawn_children.translate(Vec3 {
+                    x: 0.0,
                     y: 0.0,
                     z: 0.1,
                 });
@@ -1698,12 +1730,13 @@ fn draw_resource(
                     .count() as f32;
             let size = (operation_size * 0.95).min(operation_board_y_size * 0.95);
             let xoffset = -operation_board_x_size * 0.5 + operation_size * 0.5;
-            for (i, (kind, res)) in img_store
-                .resource_img
-                .iter()
-                .filter(|res| res.0.is_resource())
-                .enumerate()
-            {
+            let mut i = 0;
+            for j in 0..catan.players[catan.me].inner.resources.len() {
+                let kind = &TileKind::try_from(j as u8).unwrap();
+                if !kind.is_resource() {
+                    continue;
+                }
+                let res = img_store.resource_img.get(kind).unwrap();
                 let size = Vec2 { x: size, y: size };
                 spawn_children.set_config(config.clone());
                 spawn_children.translate(Vec3 {
@@ -1723,6 +1756,7 @@ fn draw_resource(
                         .clone(),
                     Vec2::new(size.x * 0.5, size.y * 0.5),
                 );
+                i += 1;
             }
         });
     }
@@ -1863,6 +1897,66 @@ fn check_trade_offering_click(
                 }
             }
 
+            if x > trade.draw.bank_yes.x - trade.draw.bank_yes.z
+                && x < trade.draw.bank_yes.x + trade.draw.bank_yes.z
+                && y > trade.draw.bank_yes.y - trade.draw.bank_yes.z
+                && y < trade.draw.bank_yes.y + trade.draw.bank_yes.z
+            {
+                action_writer.send(GameAct::TradeRequest(TradeRequest::new(
+                    trade
+                        .resource
+                        .offer
+                        .iter()
+                        .enumerate()
+                        .map(|(i, count)| {
+                            (TileKind::try_from(i as u8).unwrap(), *count as usize)
+                        })
+                        .collect(),
+                    trade
+                        .resource
+                        .want
+                        .iter()
+                        .enumerate()
+                        .map(|(i, count)| {
+                            (TileKind::try_from(i as u8).unwrap(), *count as usize)
+                        })
+                        .collect(),
+                    TradeTarget::Bank,
+                )));
+                next_trade_state.set(TradeState::WaitingResponse);
+                return;
+            }
+
+            if x > trade.draw.harbor_yes.x - trade.draw.harbor_yes.z
+                && x < trade.draw.harbor_yes.x + trade.draw.harbor_yes.z
+                && y > trade.draw.harbor_yes.y - trade.draw.harbor_yes.z
+                && y < trade.draw.harbor_yes.y + trade.draw.harbor_yes.z
+            {
+                action_writer.send(GameAct::TradeRequest(TradeRequest::new(
+                    trade
+                        .resource
+                        .offer
+                        .iter()
+                        .enumerate()
+                        .map(|(i, count)| {
+                            (TileKind::try_from(i as u8).unwrap(), *count as usize)
+                        })
+                        .collect(),
+                    trade
+                        .resource
+                        .want
+                        .iter()
+                        .enumerate()
+                        .map(|(i, count)| {
+                            (TileKind::try_from(i as u8).unwrap(), *count as usize)
+                        })
+                        .collect(),
+                    TradeTarget::Harbor,
+                )));
+                next_trade_state.set(TradeState::WaitingResponse);
+                return;
+            }
+
             if x > trade.draw.player_yes.x - trade.draw.player_yes.z
                 && x < trade.draw.player_yes.x + trade.draw.player_yes.z
                 && y > trade.draw.player_yes.y - trade.draw.player_yes.z
@@ -1967,12 +2061,13 @@ fn draw_trade(
                         .iter()
                         .filter(|res| res.0.is_resource())
                         .count() as f32;
-                for (i, (kind, res)) in img_store
-                    .resource_img
-                    .iter()
-                    .filter(|res| res.0.is_resource())
-                    .enumerate()
-                {
+                let mut i = 0;
+                for j in 0..catan.players[catan.me].inner.resources.len() {
+                    let kind = &TileKind::try_from(j as u8).unwrap();
+                    if !kind.is_resource() {
+                        continue;
+                    }
+                    let res = img_store.resource_img.get(kind).unwrap();
                     let size = Vec2 {
                         x: trade_size,
                         y: trade_size,
@@ -2126,6 +2221,7 @@ fn draw_trade(
                         Vec2::new(size.x * 0.5, size.y * 0.5),
                     );
                     trade.draw.button_size = trade_size * 0.25;
+                    i += 1;
                 }
 
                 if state.eq(&TradeState::Offering) {
@@ -2133,6 +2229,108 @@ fn draw_trade(
                     spawn_children.translate(Vec3 {
                         x: 0.,
                         y: trade_size * 1.5, // * 2.,
+                        z: 0.1,
+                    });
+                    if catan
+                        .inner
+                        .check_valid_local_trade(
+                            &Trade {
+                                from: catan.me,
+                                to: None,
+                                request: TradeRequest::new(
+                                    trade
+                                        .resource
+                                        .offer
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(i, count)| {
+                                            (
+                                                TileKind::try_from(i as u8).unwrap(),
+                                                *count as usize,
+                                            )
+                                        })
+                                        .collect(),
+                                    trade
+                                        .resource
+                                        .want
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(i, count)| {
+                                            (
+                                                TileKind::try_from(i as u8).unwrap(),
+                                                *count as usize,
+                                            )
+                                        })
+                                        .collect(),
+                                    TradeTarget::Bank,
+                                ),
+                            },
+                            &catan.players[catan.me].inner,
+                        )
+                        .is_ok()
+                    {
+                        spawn_children.image(
+                            img_store.bank_img.clone(),
+                            Vec2::new(trade_size, trade_size),
+                        );
+                    }
+                    trade.draw.bank_yes = spawn_children.transform.translation;
+                    trade.draw.bank_yes.z = trade_size / 2.;
+                    spawn_children.translate(Vec3 {
+                        x: 0.,
+                        y: -trade_size, // * 2.,
+                        z: 0.1,
+                    });
+
+                    if catan
+                        .inner
+                        .check_valid_local_trade(
+                            &Trade {
+                                from: catan.me,
+                                to: None,
+                                request: TradeRequest::new(
+                                    trade
+                                        .resource
+                                        .offer
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(i, count)| {
+                                            (
+                                                TileKind::try_from(i as u8).unwrap(),
+                                                *count as usize,
+                                            )
+                                        })
+                                        .collect(),
+                                    trade
+                                        .resource
+                                        .want
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(i, count)| {
+                                            (
+                                                TileKind::try_from(i as u8).unwrap(),
+                                                *count as usize,
+                                            )
+                                        })
+                                        .collect(),
+                                    TradeTarget::Harbor,
+                                ),
+                            },
+                            &catan.players[catan.me].inner,
+                        )
+                        .is_ok()
+                    {
+                        spawn_children.image(
+                            img_store.harbor_img.clone(),
+                            Vec2::new(trade_size, trade_size),
+                        );
+                    }
+                    trade.draw.harbor_yes = spawn_children.transform.translation;
+                    trade.draw.harbor_yes.z = trade_size / 2.;
+
+                    spawn_children.translate(Vec3 {
+                        x: 0.,
+                        y: -trade_size, // * 2.,
                         z: 0.1,
                     });
                     spawn_children
@@ -2229,7 +2427,7 @@ fn draw_trade(
     }
 }
 
-#[derive(Resource)]
+#[derive(Default, Resource)]
 struct ImageStore {
     operation_img: HashMap<Operation, Handle<Image>>,
     resource_img: HashMap<TileKind, Handle<Image>>,
@@ -2241,80 +2439,55 @@ struct ImageStore {
     harbor_img: Handle<Image>,
     robber_img: Handle<Image>,
     card_img: [Handle<Image>; DevCard::Max as usize],
-
+    dice_img: [Handle<Image>; 6],
     yes: Handle<Image>,
     no: Handle<Image>,
     add: Handle<Image>,
     sub: Handle<Image>,
 }
 
-impl ImageStore {
-    fn new() -> Self {
-        let mut operation_img = HashMap::default();
-        operation_img.insert(Operation::BuildSettlement, Default::default());
-        operation_img.insert(Operation::BuildCity, Default::default());
-        operation_img.insert(Operation::BuildRoad, Default::default());
-        operation_img.insert(Operation::Trade, Default::default());
-        operation_img.insert(Operation::BuyCard, Default::default());
-        operation_img.insert(Operation::UseCard, Default::default());
-        operation_img.insert(Operation::EndTurn, Default::default());
+fn load_img(asset_server: Res<AssetServer>, mut image_store: ResMut<ImageStore>) {
+    image_store.operation_img.insert(
+        Operation::Trade,
+        asset_server.load("catan/trade.png".to_string()),
+    );
+    image_store.operation_img.insert(
+        Operation::BuyCard,
+        asset_server.load("catan/buy_card.png".to_string()),
+    );
+    image_store.operation_img.insert(
+        Operation::UseCard,
+        asset_server.load("catan/use_card.png".to_string()),
+    );
+    image_store.operation_img.insert(
+        Operation::EndTurn,
+        asset_server.load("catan/end_turn.png".to_string()),
+    );
 
-        let mut resource_img = HashMap::default();
-        resource_img.insert(TileKind::Brick, Default::default());
-        resource_img.insert(TileKind::Grain, Default::default());
-        resource_img.insert(TileKind::Stone, Default::default());
-        resource_img.insert(TileKind::Wood, Default::default());
-        resource_img.insert(TileKind::Wool, Default::default());
-        resource_img.insert(TileKind::Dessert, Default::default());
-
-        Self {
-            operation_img,
-            resource_img,
-            number_img: Default::default(),
-            robber_img: Default::default(),
-            road_img: Default::default(),
-            settlement_img: Default::default(),
-            city_img: Default::default(),
-            card_img: Default::default(),
-            yes: Default::default(),
-            no: Default::default(),
-            add: Default::default(),
-            sub: Default::default(),
-            bank_img: Default::default(),
-            harbor_img: Default::default(),
-        }
-    }
-}
-
-fn load_img(
-    asset_server: Res<AssetServer>, mut image_store: ResMut<ImageStore>,
-    catan: Res<Catan>,
-) {
-    for (operation, img) in image_store.operation_img.iter_mut() {
-        *img = asset_server.load(match operation {
-            Operation::BuildSettlement => format!("catan/settlement_{}.png", catan.me),
-            Operation::BuildCity => format!("catan/city_{}.png", catan.me),
-            Operation::BuildRoad => format!("catan/road_{}.png", catan.me),
-            Operation::Trade => "catan/trade.png".to_string(),
-            Operation::BuyCard => "catan/buy_card.png".to_string(),
-            Operation::UseCard => "catan/use_card.png".to_string(),
-            Operation::EndTurn => "catan/end_turn.png".to_string(),
-        });
-    }
-
-    for (tile, img) in image_store.resource_img.iter_mut() {
-        *img = asset_server.load(match tile {
-            TileKind::Brick => "catan/brick.png",
-            TileKind::Grain => "catan/grain.png",
-            TileKind::Stone => "catan/stone.png",
-            TileKind::Wood => "catan/wood.png",
-            TileKind::Wool => "catan/wool.png",
-            TileKind::Dessert => "catan/dessert.png",
-            _ => {
-                unreachable!("tile kind not found")
-            },
-        });
-    }
+    image_store.resource_img.insert(
+        TileKind::Brick,
+        asset_server.load("catan/brick.png".to_string()),
+    );
+    image_store.resource_img.insert(
+        TileKind::Grain,
+        asset_server.load("catan/grain.png".to_string()),
+    );
+    image_store.resource_img.insert(
+        TileKind::Stone,
+        asset_server.load("catan/stone.png".to_string()),
+    );
+    image_store.resource_img.insert(
+        TileKind::Wood,
+        asset_server.load("catan/wood.png".to_string()),
+    );
+    image_store.resource_img.insert(
+        TileKind::Wool,
+        asset_server.load("catan/wool.png".to_string()),
+    );
+    image_store.resource_img.insert(
+        TileKind::Dessert,
+        asset_server.load("catan/dessert.png".to_string()),
+    );
 
     for i in 0..image_store.number_img.len() {
         image_store.number_img[i] =
@@ -2329,6 +2502,11 @@ fn load_img(
     for i in 0..image_store.settlement_img.len() {
         image_store.settlement_img[i] =
             asset_server.load(format!("catan/settlement_{}.png", i).to_string());
+    }
+
+    for i in 0..image_store.dice_img.len() {
+        image_store.dice_img[i] =
+            asset_server.load(format!("catan/dice_{}.png", i).to_string());
     }
 
     for i in 0..image_store.city_img.len() {
@@ -2373,7 +2551,8 @@ fn image_ready(asset_server: &Res<AssetServer>, img: Handle<Image>) -> bool {
 }
 
 fn loading(
-    mut commands: Commands, asset_server: Res<AssetServer>, img_store: Res<ImageStore>,
+    mut commands: Commands, asset_server: Res<AssetServer>,
+    mut img_store: ResMut<ImageStore>,
     mut event_reader: ConsumableEventReader<GameEvent>,
     mut next_state: ResMut<NextState<CatanLoadState>>,
 ) {
@@ -2419,6 +2598,12 @@ fn loading(
         }
     }
 
+    for image in img_store.dice_img.iter() {
+        if !image_ready(&asset_server, image.clone()) {
+            return;
+        }
+    }
+
     if !image_ready(&asset_server, img_store.robber_img.clone()) {
         return;
     }
@@ -2452,6 +2637,20 @@ fn loading(
         match event.consume() {
             GameMsg::GameStart(start) => {
                 let catan = Catan::new(start.clone());
+
+                let settlment_img = img_store.settlement_img[catan.me as usize].clone();
+                let city_img = img_store.city_img[catan.me as usize].clone();
+                let road_img = img_store.road_img[catan.me as usize].clone();
+
+                img_store
+                    .operation_img
+                    .insert(Operation::BuildSettlement, settlment_img);
+                img_store
+                    .operation_img
+                    .insert(Operation::BuildCity, city_img);
+                img_store
+                    .operation_img
+                    .insert(Operation::BuildRoad, road_img);
 
                 commands.insert_resource(catan);
                 next_state.set(CatanLoadState::Initialzing);
@@ -2498,8 +2697,9 @@ fn process_event(
                     break;
                 }
             },
-            GameMsg::PlayerRollDice(dice) => {
-                if catan.current_turn == catan.me && dice == 7 {
+            GameMsg::PlayerRollDice((dice1, dice2)) => {
+                catan.dice = (dice1, dice2);
+                if catan.current_turn == catan.me && (dice1 + dice2) == 7 {
                     next_state.set(CatanState::SelectRobber);
                     break;
                 }
@@ -2659,12 +2859,16 @@ fn process_event(
                     for (kind, count) in trade.request.from() {
                         catan.players[trade.from].inner.resources[*kind as usize] -=
                             count;
-                        catan.players[trade.to].inner.resources[*kind as usize] += count;
+                        if let Some(to) = trade.to {
+                            catan.players[to].inner.resources[*kind as usize] += count;
+                        }
                     }
                     for (kind, count) in trade.request.to() {
                         catan.players[trade.from].inner.resources[*kind as usize] +=
                             count;
-                        catan.players[trade.to].inner.resources[*kind as usize] -= count;
+                        if let Some(to) = trade.to {
+                            catan.players[to].inner.resources[*kind as usize] -= count;
+                        }
                     }
                     if catan.current_turn == catan.me {
                         next_state.set(CatanState::Menu);
@@ -2748,7 +2952,7 @@ pub fn catan_run() {
         .init_state::<UseCardState>()
         .init_resource::<Events<GameEvent>>()
         .insert_resource(new_client())
-        .insert_resource(ImageStore::new())
+        .insert_resource(ImageStore::default())
         .insert_resource(TradeBoard::default())
         .insert_resource(OperationMenu([
             OperationEntry {
