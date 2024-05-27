@@ -1,15 +1,13 @@
-use crate::catan::element;
-
-use super::element::Coordinate;
+use super::catan::element::{GameAct, GameMsg};
 
 pub enum GamePlayerAction {
-    Catan(element::GameAct),
+    Catan(GameAct),
     PlaceHolder,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GamePlayerMessage {
-    Catan(element::GameMsg),
+    Catan(GameMsg),
     PlaceHolder,
 }
 

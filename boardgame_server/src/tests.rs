@@ -8,13 +8,16 @@ mod tests {
         sync::mpsc::{UnboundedReceiver, UnboundedSender},
     };
 
+    use boardgame_common::{
+        catan::element::*,
+        element::{Coordinate, Line},
+        network::{new_server, ClientMsg, NetworkServerEvent, ServerMsg},
+        player::{GamePlayer, GamePlayerAction, GamePlayerMessage},
+    };
+
     use crate::{
-        catan::{self, data::*, element::*, game::*},
-        common::{
-            element::{Coordinate, Line},
-            network::{new_server, ClientMsg, NetworkServerEvent, ServerMsg},
-            player::{GamePlayer, GamePlayerAction, GamePlayerMessage},
-        },
+        data::CatanDataSetup,
+        game::{Catan, CatanGame, GameUpdate},
     };
 
     struct TestPlayer {
@@ -238,7 +241,7 @@ mod tests {
 
         let build = UseDevelopmentCard {
             player: 0,
-            card: catan::element::DevCard::YearOfPlenty,
+            card: DevCard::YearOfPlenty,
             usage: DevelopmentCard::YearOfPlenty(TileKind::Stone, TileKind::Stone),
         };
         if card.card.unwrap() == DevCard::YearOfPlenty {

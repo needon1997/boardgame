@@ -1,10 +1,9 @@
 use std::time::Duration;
 
-use bevy::{
-    prelude::*, render::camera::CameraPlugin, time::common_conditions::on_timer,
-    window::WindowResolution,
-};
+use bevy::{prelude::*, time::common_conditions::on_timer, window::WindowResolution};
 use rand::random;
+
+use crate::common::{CameraPlugin, WindowResizePlugin};
 
 const SNAKE_HEAD_COLOR: Color = Color::rgb(0.7, 0.7, 0.7);
 const FOOD_COLOR: Color = Color::rgb(1.0, 0.0, 1.0);
@@ -251,16 +250,19 @@ pub fn greedy_snake_run() {
         .add_event::<GrowthEvent>()
         .insert_resource(SnakeSegments::default())
         .insert_resource(LastTailPosition::default())
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                resolution:
-                    WindowResolution::new(500., 500.).with_scale_factor_override(1.0),
-                title: "Snake Game".to_string(),
+        .add_plugins((
+            WindowResizePlugin,
+            CameraPlugin,
+            DefaultPlugins.set(WindowPlugin {
+                primary_window: Some(Window {
+                    resolution: WindowResolution::new(500., 500.)
+                        .with_scale_factor_override(1.0),
+                    title: "Snake Game".to_string(),
+                    ..default()
+                }),
                 ..default()
             }),
-            ..default()
-        }))
-        .add_plugins(CameraPlugin)
+        ))
         .add_systems(Startup, spawn_snake)
         .add_systems(
             Update,

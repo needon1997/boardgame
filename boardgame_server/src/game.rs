@@ -1,13 +1,12 @@
-use std::{collections::HashMap, sync::Arc, vec};
+use std::{collections::HashMap, vec};
 
-use bevy::utils::HashSet;
-
-use crate::common::{
-    element::{Coordinate, Line},
+use boardgame_common::{
+    catan::element::*,
+    element::Line,
     player::{GamePlayer, GamePlayerAction, GamePlayerMessage},
 };
 
-use super::{data::*, element::*};
+use super::data::*;
 
 pub(super) enum GameUpdate {
     HitDice(usize),
@@ -438,8 +437,8 @@ where
         self.players[offer.player].base.resources[offer.kind as usize] =
             (self.players[offer.player].base.resources[offer.kind as usize] as isize
                 + offer.count)
-                .min(0)
-                .max(20) as usize;
+                .max(0)
+                .min(20) as usize;
         self.broadcast.push(GameMsg::PlayerOfferResources(offer));
     }
 
@@ -631,6 +630,45 @@ where
         self.broadcast(GameMsg::PlayerRollDice((dice1, dice2)))
             .await;
         if dice1 + dice2 == 7 {
+            let mut drop_list = Vec::new();
+            for i in 0..self.players.len() {
+                let sum = self.players[i].base.resources.iter().sum::<usize>();
+                if sum > 7 {
+                    drop_list.push((i, sum / 2));
+                    self.broadcast
+                        .push(GameMsg::PlayerDropResources((i, sum / 2)))
+                }
+            }
+            self.flush_messages().await;
+
+            for (player, count) in drop_list {
+                match self.players[player].get_action().await {
+                    GameAct::DropResource(drop) => {
+                        if drop.iter().fold(0, |sum, (_, cnt)| sum + cnt) != count {
+                            panic!("Invalid drop count");
+                        }
+
+                        for (kind, count) in drop {
+                            if self.players[player].base.resources[kind as usize] < count
+                            {
+                                panic!("Not enough resources");
+                            }
+                            self.update(GameUpdate::OfferResources(OfferResources {
+                                player,
+                                count: -(count as isize),
+                                kind,
+                            }))
+                            .unwrap();
+                        }
+                    },
+                    _ => {
+                        panic!("Invalid action")
+                    },
+                }
+            }
+            self.flush_messages().await;
+
+            self.broadcast(GameMsg::PlayerStartSelectRobber()).await;
             match self.players[self.current_player].get_action().await {
                 GameAct::SelectRobber((target, coord)) => {
                     self.update(GameUpdate::SelectRobber(SelectRobber {
@@ -716,8 +754,6 @@ where
                     }
                 },
                 GameAct::TradeRequest(trade_request) => {
-                    let mut to = 0;
-
                     if trade_request_count >= 3 {
                         panic!("Only 3 trade requests allowed per turn")
                     } else {

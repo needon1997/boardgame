@@ -1,8 +1,5 @@
-use super::element::{Point, TileKind};
-use crate::{
-    catan::element::{DevCard, Tile},
-    common::element::{Coordinate, Line},
-};
+use boardgame_common::catan::element::{DevCard, Point, Tile, TileKind};
+use boardgame_common::element::{Coordinate, Line};
 use rand::{prelude::SliceRandom, thread_rng};
 use std::collections::HashMap;
 
@@ -38,40 +35,40 @@ impl CatanData {
 
         const HARBOR_CANDIATE: [Line; 9] = [
             Line {
-                start: Coordinate { x: 0, y: 1 },
-                end: Coordinate { x: 1, y: 0 },
-            },
-            Line {
-                start: Coordinate { x: 0, y: 3 },
-                end: Coordinate { x: 1, y: 4 },
-            },
-            Line {
-                start: Coordinate { x: 1, y: 0 },
-                end: Coordinate { x: 2, y: 0 },
-            },
-            Line {
-                start: Coordinate { x: 1, y: 4 },
-                end: Coordinate { x: 2, y: 4 },
+                start: Coordinate { x: 1, y: 1 },
+                end: Coordinate { x: 1, y: 2 },
             },
             Line {
                 start: Coordinate { x: 2, y: 0 },
                 end: Coordinate { x: 3, y: 0 },
             },
             Line {
-                start: Coordinate { x: 2, y: 4 },
-                end: Coordinate { x: 3, y: 4 },
-            },
-            Line {
-                start: Coordinate { x: 3, y: 0 },
-                end: Coordinate { x: 4, y: 1 },
-            },
-            Line {
-                start: Coordinate { x: 3, y: 4 },
-                end: Coordinate { x: 4, y: 3 },
-            },
-            Line {
                 start: Coordinate { x: 4, y: 1 },
-                end: Coordinate { x: 4, y: 3 },
+                end: Coordinate { x: 4, y: 2 },
+            },
+            Line {
+                start: Coordinate { x: 5, y: 4 },
+                end: Coordinate { x: 5, y: 5 },
+            },
+            Line {
+                start: Coordinate { x: 5, y: 7 },
+                end: Coordinate { x: 5, y: 8 },
+            },
+            Line {
+                start: Coordinate { x: 0, y: 4 },
+                end: Coordinate { x: 0, y: 5 },
+            },
+            Line {
+                start: Coordinate { x: 0, y: 7 },
+                end: Coordinate { x: 0, y: 8 },
+            },
+            Line {
+                start: Coordinate { x: 1, y: 9 },
+                end: Coordinate { x: 2, y: 9 },
+            },
+            Line {
+                start: Coordinate { x: 3, y: 9 },
+                end: Coordinate { x: 4, y: 9 },
             },
         ];
 
@@ -103,10 +100,10 @@ impl CatanData {
             TileKind::Grain,
             TileKind::Stone,
             TileKind::Brick,
-            TileKind::Empty,
-            TileKind::Empty,
-            TileKind::Empty,
-            TileKind::Empty,
+            TileKind::Dessert,
+            TileKind::Dessert,
+            TileKind::Dessert,
+            TileKind::Dessert,
         ];
 
         const DEVELOPMENT_CARD: [(DevCard, usize); 5] = [

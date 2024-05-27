@@ -1,0 +1,25 @@
+[package]
+name = "boardgame_client"
+version = "0.1.0"
+edition = "2021"
+resolver = "2"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bevy = { version = "0.13.0" }
+bevy_consumable_event = "0.3.0"
+bevy_framepace = { git = "https://github.com/needon1997/bevy_framepace.git" }
+bevy_simplenet = { git = "https://github.com/needon1997/bevy_simplenet.git", default_features = false, features = ["client"] }
+bevy_vector_shapes = "0.7.0"
+bevy_web_asset = "0.8.0"
+log = "0.4"
+rand = "0.8.4"
+serde = "1.0.202"
+url = { version = "2" }
+boardgame_common = { path = "../boardgame_common", features = ["client"] }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+console_error_panic_hook = { version = "0.1" }
+tracing-wasm             = { version = "0.2" }
+web-sys = { version = "0.3" }

@@ -5,7 +5,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::common::element::{Coordinate, Line};
+use crate::element::{Coordinate, Line};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
@@ -395,24 +395,38 @@ impl CatanCommon {
         let mut valid_count = 0;
         let mut request_count = 0;
 
+        if trade
+            .request
+            .from()
+            .iter()
+            .fold(0, |sum, (_, count)| sum + *count)
+            == 0
+        {
+            return Err("No resources to trade".to_owned());
+        }
         match trade.request.target() {
             TradeTarget::Player => {
                 unreachable!("Player to player trade not reachable")
             },
             TradeTarget::Bank => {
                 for (kind, count) in trade.request.from() {
-                    if *count < 4 {
-                        return Err(format!("Not enough {:?} to trade with bank", kind));
-                    }
-                    if *count % 4 != 0 {
-                        return Err("Trade count must be a multiple of 4".to_owned());
-                    }
+                    if *count > 0 {
+                        if *count < 4 {
+                            return Err(format!(
+                                "Not enough {:?} to trade with bank",
+                                kind
+                            ));
+                        }
+                        if *count % 4 != 0 {
+                            return Err("Trade count must be a multiple of 4".to_owned());
+                        }
 
-                    if player.resources[*kind as usize] < *count {
-                        return Err("Not enough resources".to_owned());
-                    }
+                        if player.resources[*kind as usize] < *count {
+                            return Err("Not enough resources".to_owned());
+                        }
 
-                    valid_count += count / 4;
+                        valid_count += count / 4;
+                    }
                 }
             },
             TradeTarget::Harbor => {
@@ -442,7 +456,7 @@ impl CatanCommon {
                         }
 
                         valid_count += count / 2;
-                    } else if harbor.contains(&TileKind::Empty) {
+                    } else if harbor.contains(&TileKind::Dessert) {
                         if *count % 3 != 0 {
                             return Err("Trade count must be a multiple of 3".to_owned());
                         }
@@ -733,6 +747,7 @@ pub enum GameAct {
     TradeResponse(TradeResponse),
     TradeConfirm(Option<usize>),
     SelectRobber((Option<usize>, Coordinate)),
+    DropResource(Vec<(TileKind, usize)>),
     StealResource(usize),
     EndTurn,
 }
@@ -758,10 +773,12 @@ pub enum GameMsg {
     PlayerBuildCity(BuildCity),
     PlayerBuyDevelopmentCard(BuyDevelopmentCard),
     PlayerUseDevelopmentCard(UseDevelopmentCard),
+    PlayerStartSelectRobber(),
     PlayerSelectRobber(SelectRobber),
     PlayerTradeRequest((usize, TradeRequest)),
     PlayerTradeResponse((usize, TradeResponse)),
     PlayerTrade(Option<Trade>),
     PlayerOfferResources(OfferResources),
+    PlayerDropResources((usize, usize)),
     PlayerEndTurn(usize),
 }
