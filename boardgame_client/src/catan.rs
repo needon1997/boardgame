@@ -1,5 +1,8 @@
 use bevy::asset::{AssetMetaCheck, LoadState};
+use bevy::ecs::world;
 use bevy::prelude::*;
+use bevy::render::view::visibility;
+use bevy::ui::update;
 use bevy::window::WindowResolution;
 use bevy::DefaultPlugins;
 use bevy_consumable_event::{
@@ -57,13 +60,29 @@ struct CatanPlayer {
     draw: CatanPlayerDraw,
 }
 
+#[derive(Debug)]
+struct CatanResourceProperty {
+    tranform: Transform,
+    size: Vec2,
+}
+
+#[derive(Debug, Default)]
+struct DiceProperty {
+    tranform: Transform,
+    size: Vec2,
+    nubmer: u8,
+}
+
 #[derive(Resource)]
 struct Catan {
+    resources: Vec<CatanResourceProperty>,
+    operations: Vec<OperationEntry>,
+    dices: [DiceProperty; 2],
     inner: CatanCommon,
     tiles: Vec<Vec<Vec3>>,
     points: Vec<Vec<Vec3>>,
     players: Vec<CatanPlayer>,
-    radius: Option<f32>,
+    radius: f32,
     me: usize,
     current_turn: usize,
     stealing_candidate: HashSet<usize>,
@@ -71,7 +90,6 @@ struct Catan {
     road_building: Option<Line>,
     used_card: bool,
     drop_cnt: usize,
-    dice: (u8, u8),
 }
 
 impl Catan {
@@ -109,10 +127,13 @@ impl Catan {
         );
 
         Self {
+            resources: Default::default(),
+            operations: Default::default(),
+            dices: Default::default(),
             inner,
             tiles: draw_tiles,
             points: draw_points,
-            radius: None,
+            radius: 0.0,
             players: start
                 .players
                 .iter()
@@ -128,66 +149,6 @@ impl Catan {
             selected_yop: None,
             road_building: None,
             used_card: false,
-            dice: (1, 1),
-        }
-    }
-
-    fn update_radius(&mut self, radius: f32, translate: Vec3) {
-        match self.radius {
-            Some(r) if r == radius => {},
-            _ => {
-                self.radius = Some(radius);
-                let x_offset = radius;
-                let y_offset =
-                    ((radius * radius - (radius / 2. * radius / 2.)) as f32).sqrt();
-                for i in 0..self.tiles.len() {
-                    for j in 0..self.tiles[i].len() {
-                        if i % 2 == 0 {
-                            self.tiles[i][j] = Vec3::new(
-                                x_offset + 3. * x_offset * (i / 2) as f32,
-                                y_offset + 2. * y_offset * j as f32,
-                                1.,
-                            ) + translate;
-                        } else {
-                            self.tiles[i][j] = Vec3::new(
-                                2.5 * x_offset as f32 + 3. * x_offset * (i / 2) as f32,
-                                2. * y_offset + 2. * y_offset * j as f32,
-                                1.,
-                            ) + translate;
-                        }
-                    }
-                }
-
-                for i in 0..self.points.len() {
-                    for j in 0..self.points[i].len() {
-                        if i % 2 == 0 && j % 2 == 0 {
-                            self.points[i][j] = Vec3::new(
-                                x_offset / 2. + 3. * x_offset * (i / 2) as f32,
-                                y_offset * j as f32,
-                                1.2,
-                            ) + translate;
-                        } else if i % 2 == 0 && j % 2 == 1 {
-                            self.points[i][j] = Vec3::new(
-                                3. * x_offset * (i / 2) as f32,
-                                y_offset * j as f32,
-                                1.2,
-                            ) + translate;
-                        } else if i % 2 == 1 && j % 2 == 0 {
-                            self.points[i][j] = Vec3::new(
-                                x_offset / 2. + x_offset + 3. * x_offset * (i / 2) as f32,
-                                y_offset * j as f32,
-                                1.2,
-                            ) + translate;
-                        } else if i % 2 == 1 && j % 2 == 1 {
-                            self.points[i][j] = Vec3::new(
-                                2. * x_offset + 3. * x_offset * (i / 2) as f32,
-                                y_offset * j as f32,
-                                1.2,
-                            ) + translate;
-                        }
-                    }
-                }
-            },
         }
     }
 }
@@ -204,10 +165,10 @@ fn check_build_city(
             let y = -(mouse.y - windows.iter().next().unwrap().height() / 2.);
             for i in 0..catan.points.len() {
                 for j in 0..catan.points[i].len() {
-                    if x > catan.points[i][j].x - catan.radius.unwrap() * 0.2
-                        && x < catan.points[i][j].x + catan.radius.unwrap() * 0.2
-                        && y > catan.points[i][j].y - catan.radius.unwrap() * 0.2
-                        && y < catan.points[i][j].y + catan.radius.unwrap() * 0.2
+                    if x > catan.points[i][j].x - catan.radius * 0.2
+                        && x < catan.points[i][j].x + catan.radius * 0.2
+                        && y > catan.points[i][j].y - catan.radius * 0.2
+                        && y < catan.points[i][j].y + catan.radius * 0.2
                     {
                         let coordinate = Coordinate { x: i, y: j };
                         let me = catan.me;
@@ -242,10 +203,10 @@ fn check_build_settlement(
             let y = -(mouse.y - windows.iter().next().unwrap().height() / 2.);
             for i in 0..catan.points.len() {
                 for j in 0..catan.points[i].len() {
-                    if x > catan.points[i][j].x - catan.radius.unwrap() * 0.2
-                        && x < catan.points[i][j].x + catan.radius.unwrap() * 0.2
-                        && y > catan.points[i][j].y - catan.radius.unwrap() * 0.2
-                        && y < catan.points[i][j].y + catan.radius.unwrap() * 0.2
+                    if x > catan.points[i][j].x - catan.radius * 0.2
+                        && x < catan.points[i][j].x + catan.radius * 0.2
+                        && y > catan.points[i][j].y - catan.radius * 0.2
+                        && y < catan.points[i][j].y + catan.radius * 0.2
                     {
                         let coordinate = Coordinate { x: i, y: j };
                         let me = catan.me;
@@ -295,10 +256,10 @@ fn check_init_settlement(
             let y = -(mouse.y - windows.iter().next().unwrap().height() / 2.);
             for i in 0..catan.points.len() {
                 for j in 0..catan.points[i].len() {
-                    if x > catan.points[i][j].x - catan.radius.unwrap() * 0.2
-                        && x < catan.points[i][j].x + catan.radius.unwrap() * 0.2
-                        && y > catan.points[i][j].y - catan.radius.unwrap() * 0.2
-                        && y < catan.points[i][j].y + catan.radius.unwrap() * 0.2
+                    if x > catan.points[i][j].x - catan.radius * 0.2
+                        && x < catan.points[i][j].x + catan.radius * 0.2
+                        && y > catan.points[i][j].y - catan.radius * 0.2
+                        && y < catan.points[i][j].y + catan.radius * 0.2
                     {
                         let coordinate = Coordinate { x: i, y: j };
                         let me = catan.me;
@@ -328,7 +289,8 @@ fn check_init_settlement(
 
 fn check_init_road(
     windows: Query<&Window>, mouse_button_input: Res<ButtonInput<MouseButton>>,
-    mut catan: ResMut<Catan>, mut next_state: ResMut<NextState<CatanState>>,
+    roads: Query<(Entity, &BuildableCatanRoad)>, mut catan: ResMut<Catan>,
+    mut next_state: ResMut<NextState<CatanState>>,
     mut action_writer: ConsumableEventWriter<GameAction>,
 ) {
     if mouse_button_input.just_pressed(MouseButton::Left) {
@@ -337,85 +299,26 @@ fn check_init_road(
             let x = mouse.x - windows.iter().next().unwrap().width() / 2.;
             let y = -(mouse.y - windows.iter().next().unwrap().height() / 2.);
 
-            for i in 0..catan.points.len() {
-                for j in 0..catan.points[i].len() {
-                    let point = Coordinate { x: i, y: j };
-                    if let Some(player) = catan.inner.point(point).owner() {
-                        if player == catan.me {
-                            for candidate in catan.inner.point_get_points(point) {
-                                if let Some(candidate) = candidate {
-                                    let road = Line::new(point, candidate);
-                                    if catan.inner.roads().get(&road).is_none() {
-                                        if x > (catan.points[i][j]
-                                            + catan.points[candidate.x][candidate.y])
-                                            .x
-                                            / 2.
-                                            - catan.radius.unwrap() * 0.2
-                                            && x < (catan.points[i][j]
-                                                + catan.points[candidate.x][candidate.y])
-                                                .x
-                                                / 2.
-                                                + catan.radius.unwrap() * 0.2
-                                            && y > (catan.points[i][j]
-                                                + catan.points[candidate.x][candidate.y])
-                                                .y
-                                                / 2.
-                                                - catan.radius.unwrap() * 0.2
-                                            && y < (catan.points[i][j]
-                                                + catan.points[candidate.x][candidate.y])
-                                                .y
-                                                / 2.
-                                                + catan.radius.unwrap() * 0.2
-                                        {
-                                            action_writer.send(
-                                                GameAct::BuildRoad(point, candidate)
-                                                    .into(),
-                                            );
-                                            let me = catan.me;
-                                            catan.inner.add_road(me, road);
-                                            catan.players[me].inner.add_road(road);
-                                            next_state.set(CatanState::Wait);
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+            for (_, road) in roads.iter() {
+                let point = (catan.points[road.line.start.x][road.line.start.y]
+                    + catan.points[road.line.end.x][road.line.end.y])
+                    / 2.0;
+                if x > point.x - catan.radius * 0.25
+                    && x < point.x + catan.radius * 0.25
+                    && y > point.y - catan.radius * 0.25
+                    && y < point.y + catan.radius * 0.25
+                {
+                    action_writer
+                        .send(GameAct::BuildRoad(road.line.start, road.line.end).into());
+                    let me = catan.me;
+                    catan.inner.add_road(me, road.line);
+                    catan.players[me].inner.add_road(road.line);
+                    next_state.set(CatanState::Wait);
+                    break;
                 }
             }
         }
     }
-}
-
-fn draw_initable_roads(painter: &mut ShapePainter, catan: &ResMut<Catan>) {
-    let config = painter.config().clone();
-
-    for i in 0..catan.points.len() {
-        for j in 0..catan.points[i].len() {
-            let point = Coordinate { x: i, y: j };
-            if let Some(player) = catan.inner.point(point).owner() {
-                if player == catan.me {
-                    for candidate in catan.inner.point_get_points(point) {
-                        if let Some(candidate) = candidate {
-                            let road = Line::new(point, candidate);
-                            if catan.inner.roads().get(&road).is_none() {
-                                painter.reset();
-                                painter.translate(
-                                    (catan.points[i][j]
-                                        + catan.points[candidate.x][candidate.y])
-                                        / 2.,
-                                );
-                                painter.color = Color::rgb(1.0, 1.0, 1.0);
-                                painter.circle(catan.radius.unwrap() * 0.2);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    painter.set_config(config);
 }
 
 fn check_build_road(
@@ -456,22 +359,22 @@ fn check_build_road(
                     + catan.points[road.end.x][road.end.y])
                     .x
                     / 2.
-                    - catan.radius.unwrap() * 0.2
+                    - catan.radius * 0.2
                     && x < (catan.points[road.start.x][road.start.y]
                         + catan.points[road.end.x][road.end.y])
                         .x
                         / 2.
-                        + catan.radius.unwrap() * 0.2
+                        + catan.radius * 0.2
                     && y > (catan.points[road.start.x][road.start.y]
                         + catan.points[road.end.x][road.end.y])
                         .y
                         / 2.
-                        - catan.radius.unwrap() * 0.2
+                        - catan.radius * 0.2
                     && y < (catan.points[road.start.x][road.start.y]
                         + catan.points[road.end.x][road.end.y])
                         .y
                         / 2.
-                        + catan.radius.unwrap() * 0.2
+                        + catan.radius * 0.2
                 {
                     let me = catan.me;
                     catan.players[me].inner.resources[TileKind::Brick as usize] -= 1;
@@ -524,22 +427,22 @@ fn check_road_building_build_road(
                     + catan.points[road.end.x][road.end.y])
                     .x
                     / 2.
-                    - catan.radius.unwrap() * 0.2
+                    - catan.radius * 0.2
                     && x < (catan.points[road.start.x][road.start.y]
                         + catan.points[road.end.x][road.end.y])
                         .x
                         / 2.
-                        + catan.radius.unwrap() * 0.2
+                        + catan.radius * 0.2
                     && y > (catan.points[road.start.x][road.start.y]
                         + catan.points[road.end.x][road.end.y])
                         .y
                         / 2.
-                        - catan.radius.unwrap() * 0.2
+                        - catan.radius * 0.2
                     && y < (catan.points[road.start.x][road.start.y]
                         + catan.points[road.end.x][road.end.y])
                         .y
                         / 2.
-                        + catan.radius.unwrap() * 0.2
+                        + catan.radius * 0.2
                     && Some(road) != catan.road_building
                 {
                     if catan.road_building.is_none() {
@@ -561,154 +464,6 @@ fn check_road_building_build_road(
             }
         }
     }
-}
-
-fn draw_buildable_roads(painter: &mut ShapePainter, catan: &ResMut<Catan>) {
-    let config = painter.config().clone();
-    let mut buildable_road = HashSet::new();
-
-    for (road, player) in catan.inner.roads() {
-        if *player == catan.me {
-            for candidate in catan.inner.point_get_points(road.start) {
-                if let Some(candidate) = candidate {
-                    let road = Line::new(road.start, candidate);
-                    if catan.inner.roads().get(&road).is_none()
-                        && catan.inner.point_valid(candidate)
-                        && Some(road) != catan.road_building
-                    {
-                        buildable_road.insert(road);
-                    }
-                }
-            }
-            for candidate in catan.inner.point_get_points(road.end) {
-                if let Some(candidate) = candidate {
-                    let road = Line::new(road.end, candidate);
-                    if catan.inner.roads().get(&road).is_none()
-                        && catan.inner.point_valid(candidate)
-                        && Some(road) != catan.road_building
-                    {
-                        buildable_road.insert(road);
-                    }
-                }
-            }
-        }
-    }
-
-    match catan.road_building {
-        Some(road) => {
-            for candidate in catan.inner.point_get_points(road.start) {
-                if let Some(candidate) = candidate {
-                    let road = Line::new(road.start, candidate);
-                    if catan.inner.roads().get(&road).is_none()
-                        && catan.inner.point_valid(candidate)
-                        && Some(road) != catan.road_building
-                    {
-                        buildable_road.insert(road);
-                    }
-                }
-            }
-            for candidate in catan.inner.point_get_points(road.end) {
-                if let Some(candidate) = candidate {
-                    let road = Line::new(road.end, candidate);
-                    if catan.inner.roads().get(&road).is_none()
-                        && catan.inner.point_valid(candidate)
-                        && Some(road) != catan.road_building
-                    {
-                        buildable_road.insert(road);
-                    }
-                }
-            }
-        },
-        None => {},
-    }
-
-    for road in buildable_road {
-        painter.reset();
-        painter.translate(
-            (catan.points[road.start.x][road.start.y]
-                + catan.points[road.end.x][road.end.y])
-                / 2.,
-        );
-        painter.color = Color::rgb(1.0, 1.0, 1.0);
-        painter.circle(catan.radius.unwrap() * 0.2);
-    }
-    painter.set_config(config);
-}
-
-fn road_get_rotate(start: Vec3, end: Vec3) -> f32 {
-    let x = end.x - start.x;
-    let y = end.y - start.y;
-    if x == 0. {
-        PI / 2.
-    } else {
-        (y / x).atan() + PI / 2.
-    }
-}
-
-fn draw_roads(
-    painter: &mut ShapePainter, catan: &ResMut<Catan>, img_store: &Res<ImageStore>,
-) {
-    let config = painter.config().clone();
-
-    for (road, player) in catan.inner.roads() {
-        let start = catan.points[road.start.x][road.start.y];
-        let end = catan.points[road.end.x][road.end.y];
-        painter.reset();
-        painter.translate((start + end) / 2. + Vec3::new(0., 0., -0.1));
-        painter.rotate_z(road_get_rotate(start, end));
-        painter.image(
-            img_store.road_img[*player].clone(),
-            Vec2::new(catan.radius.unwrap() * 0.5, catan.radius.unwrap()),
-        );
-    }
-
-    if let Some(road) = &catan.road_building {
-        let start = catan.points[road.start.x][road.start.y];
-        let end = catan.points[road.end.x][road.end.y];
-        painter.reset();
-        painter.translate((start + end) / 2. + Vec3::new(0., 0., -0.1));
-        painter.rotate_z(road_get_rotate(start, end));
-        painter.image(
-            img_store.road_img[catan.me].clone(),
-            Vec2::new(catan.radius.unwrap() * 0.5, catan.radius.unwrap()),
-        );
-    }
-    painter.set_config(config);
-}
-
-enum PointDraw {
-    Img(Handle<Image>),
-    Circle(Color),
-}
-
-fn draw_points<F>(painter: &mut ShapePainter, catan: &ResMut<Catan>, f: F)
-where
-    F: Fn(Coordinate) -> Option<PointDraw>,
-{
-    let config = painter.config().clone();
-
-    for i in 0..catan.points.len() {
-        for j in 0..catan.points[i].len() {
-            let point = Coordinate { x: i, y: j };
-            if let Some(draw) = f(point) {
-                painter.reset();
-                painter.translate(catan.points[i][j]);
-                match draw {
-                    PointDraw::Img(image) => {
-                        painter.image(
-                            image,
-                            Vec2::new(catan.radius.unwrap(), catan.radius.unwrap()),
-                        );
-                    },
-                    PointDraw::Circle(color) => {
-                        painter.color = color;
-                        painter.circle(catan.radius.unwrap() * 0.2);
-                    },
-                }
-            }
-        }
-    }
-    painter.set_config(config);
 }
 
 fn check_steal_target(
@@ -780,10 +535,10 @@ fn check_select_robber(
             let y = -(mouse.y - windows.iter().next().unwrap().height() / 2.);
             for i in 0..catan.tiles.len() {
                 for j in 0..catan.tiles[i].len() {
-                    if x > catan.tiles[i][j].x - catan.radius.unwrap() * 0.9
-                        && x < catan.tiles[i][j].x + catan.radius.unwrap() * 0.9
-                        && y > catan.tiles[i][j].y - catan.radius.unwrap() * 0.9
-                        && y < catan.tiles[i][j].y + catan.radius.unwrap() * 0.9
+                    if x > catan.tiles[i][j].x - catan.radius * 0.9
+                        && x < catan.tiles[i][j].x + catan.radius * 0.9
+                        && y > catan.tiles[i][j].y - catan.radius * 0.9
+                        && y < catan.tiles[i][j].y + catan.radius * 0.9
                     {
                         let coordinate = Coordinate { x: i, y: j };
                         if catan.inner.tile(coordinate).kind() != TileKind::Empty
@@ -871,10 +626,10 @@ fn check_knight_select_robber(
             print!("check_knight_select_robber x: {} y: {}", x, y);
             for i in 0..catan.tiles.len() {
                 for j in 0..catan.tiles[i].len() {
-                    if x > catan.tiles[i][j].x - catan.radius.unwrap() * 0.9
-                        && x < catan.tiles[i][j].x + catan.radius.unwrap() * 0.9
-                        && y > catan.tiles[i][j].y - catan.radius.unwrap() * 0.9
-                        && y < catan.tiles[i][j].y + catan.radius.unwrap() * 0.9
+                    if x > catan.tiles[i][j].x - catan.radius * 0.9
+                        && x < catan.tiles[i][j].x + catan.radius * 0.9
+                        && y > catan.tiles[i][j].y - catan.radius * 0.9
+                        && y < catan.tiles[i][j].y + catan.radius * 0.9
                     {
                         let coordinate = Coordinate { x: i, y: j };
                         if catan.inner.tile(coordinate).kind() != TileKind::Empty
@@ -920,280 +675,497 @@ fn check_knight_select_robber(
     }
 }
 
-fn draw_tiles(
-    painter: &mut ShapePainter, catan: &ResMut<Catan>, img_store: &Res<ImageStore>,
-    state: &CatanState, card_state: &UseCardState,
-) {
-    let config = painter.config().clone();
-
-    for i in 0..catan.tiles.len() {
-        for j in 0..catan.tiles[i].len() {
-            let coord = Coordinate { x: i, y: j };
-            if catan.inner.tile(Coordinate { x: i, y: j }).kind() != TileKind::Empty {
-                painter.reset();
-                painter.translate(Vec3::new(
-                    catan.tiles[i][j].x as f32,
-                    catan.tiles[i][j].y as f32,
-                    0.1,
-                ));
-                painter.image(
-                    img_store.resource_img
-                        [&catan.inner.tile(Coordinate { x: i, y: j }).kind()]
-                        .clone(),
-                    Vec2::new(catan.radius.unwrap() * 1.8, catan.radius.unwrap() * 1.8),
-                );
-                painter.translate(Vec3::new(0., 0., 0.1));
-                match catan.inner.tile(coord).number() {
-                    Some(number) => {
-                        painter.image(
-                            img_store.number_img[number].clone(),
-                            Vec2::new(catan.radius.unwrap(), catan.radius.unwrap()),
-                        );
-                    },
-                    _ => {},
-                }
-                if catan.inner.robber() == coord {
-                    painter.translate(Vec3::new(0., 0., 0.1));
-                    painter.image(
-                        img_store.robber_img.clone(),
-                        Vec2::new(catan.radius.unwrap() * 2., catan.radius.unwrap() * 2.),
-                    );
-                } else if (state.eq(&CatanState::SelectRobber)
-                    || card_state.eq(&UseCardState::Knight))
-                    && catan.inner.tile(Coordinate { x: i, y: j }).kind()
-                        != TileKind::Dessert
-                {
-                    painter.translate(Vec3::new(0.0, 0.0, 0.1));
-                    painter.color = Color::rgba(1.0, 1.0, 1.0, 0.5);
-                    painter.circle(catan.radius.unwrap() * 0.5);
-                }
-            }
-        }
-    }
-    painter.set_config(config);
+#[derive(Component)]
+struct CatanTile {
+    x: usize,
+    y: usize,
 }
 
-fn draw_harbour(
-    painter: &mut ShapePainter, catan: &ResMut<Catan>, img_store: &Res<ImageStore>,
-) {
-    let config = painter.config().clone();
-
-    for (road, kind) in catan.inner.harbors() {
-        match *kind {
-            TileKind::Wood
-            | TileKind::Brick
-            | TileKind::Grain
-            | TileKind::Wool
-            | TileKind::Stone
-            | TileKind::Dessert => {
-                painter.reset();
-                painter.translate(
-                    (catan.points[road.start.x][road.start.y]
-                        + catan.points[road.end.x][road.end.y])
-                        / 2.,
-                );
-                painter.image(
-                    img_store.resource_img[kind].clone(),
-                    Vec2::new(catan.radius.unwrap() * 0.3, catan.radius.unwrap() * 0.3),
-                );
-            },
-            _ => {
-                unreachable!()
-            },
+impl From<Coordinate> for CatanTile {
+    fn from(coord: Coordinate) -> Self {
+        CatanTile {
+            x: coord.x,
+            y: coord.y,
         }
-    }
-    painter.set_config(config);
-}
-
-fn draw_board(
-    mut painter: ShapePainter, mut catan: ResMut<Catan>, windows: Query<&Window>,
-    state: Res<State<CatanState>>, card_state: Res<State<UseCardState>>,
-    img_store: Res<ImageStore>,
-) {
-    for window in windows.iter() {
-        info!(
-            "window width: {} height: {}",
-            window.width(),
-            window.height()
-        );
-        painter.color = Color::rgb(0.0, 0.0, 0.0);
-        let board_size = window.width().min(window.height() * 0.7);
-        let board_translate = Vec3 {
-            x: 0.0,
-            y: window.height() / 2. - board_size / 2.0,
-            z: 0.0,
-        };
-        let element_translate = Vec3 {
-            x: -board_size / 2.0,
-            y: -board_size / 2.0,
-            z: 0.0,
-        };
-        painter.translate(board_translate);
-        painter.with_children(|child_painter| {
-            child_painter.translate(element_translate);
-
-            let radius = board_size
-                / if catan.tiles.len() % 2 == 0 {
-                    (catan.tiles.len() * 3 / 2) as f32 + 0.25
-                } else {
-                    (catan.tiles.len() * 3 / 2) as f32 + 1.
-                }
-                .max(0.866 * 2. * catan.tiles[0].len() as f32);
-            catan.update_radius(radius, child_painter.transform.translation);
-            draw_tiles(
-                child_painter,
-                &catan,
-                &img_store,
-                state.get(),
-                card_state.get(),
-            );
-            draw_harbour(child_painter, &catan, &img_store);
-            draw_roads(child_painter, &catan, &img_store);
-            draw_points(child_painter, &catan, |point| {
-                if catan.inner.point_valid(point)
-                    && catan.inner.point(point).owner().is_some()
-                {
-                    if !catan.inner.point(point).is_city() {
-                        Some(PointDraw::Img(
-                            img_store.settlement_img
-                                [catan.inner.point(point).owner().unwrap()]
-                            .clone(),
-                        ))
-                    } else {
-                        Some(PointDraw::Img(
-                            img_store.city_img[catan.inner.point(point).owner().unwrap()]
-                                .clone(),
-                        ))
-                    }
-                } else {
-                    None
-                }
-            });
-
-            if state.eq(&CatanState::BuidSettlement) {
-                draw_points(child_painter, &catan, |point| {
-                    if catan.inner.point_valid(point)
-                        && catan.inner.point(point).owner().is_none()
-                        && catan.players[catan.me].inner.can_build_settlement()
-                        && catan.players[catan.me].inner.have_roads_to(point)
-                        && !catan.inner.point_get_points(point).iter().any(|&p| {
-                            if let Some(p) = p {
-                                catan.inner.point(p).is_owned()
-                            } else {
-                                false
-                            }
-                        })
-                    {
-                        Some(PointDraw::Circle(Color::WHITE))
-                    } else {
-                        None
-                    }
-                });
-            } else if state.eq(&CatanState::BuildCity) {
-                draw_points(child_painter, &catan, |point| {
-                    if catan.inner.point(point).owner().is_some()
-                        && catan.inner.point(point).owner().unwrap() == catan.me
-                        && !catan.inner.point(point).is_city()
-                        && catan.players[catan.me].inner.can_build_city()
-                    {
-                        Some(PointDraw::Circle(Color::WHITE))
-                    } else {
-                        None
-                    }
-                });
-            } else if state.eq(&CatanState::InitSettlement) {
-                draw_points(child_painter, &catan, |point| {
-                    if catan.inner.point_valid(point)
-                        && catan.inner.point(point).owner().is_none()
-                        && !catan.inner.point_get_points(point).iter().any(|&p| {
-                            if let Some(p) = p {
-                                catan.inner.point(p).is_owned()
-                            } else {
-                                false
-                            }
-                        })
-                    {
-                        Some(PointDraw::Circle(Color::WHITE))
-                    } else {
-                        None
-                    }
-                });
-            } else if state.eq(&CatanState::BuildRoad)
-                || card_state.eq(&UseCardState::RoadBuilding)
-            {
-                draw_buildable_roads(child_painter, &catan);
-            } else if state.eq(&CatanState::InitRoad) {
-                draw_initable_roads(child_painter, &catan);
-            }
-        });
     }
 }
 
 #[derive(Component)]
-struct PlayerText;
+struct CatanPoint {
+    x: usize,
+    y: usize,
+}
 
-fn update_player_text(
-    mut texts: Query<(Entity, &mut Transform), With<PlayerText>>, catan: Res<Catan>,
+impl From<Coordinate> for CatanPoint {
+    fn from(coord: Coordinate) -> Self {
+        CatanPoint {
+            x: coord.x,
+            y: coord.y,
+        }
+    }
+}
+
+#[derive(Component)]
+struct CatanRobber;
+
+#[derive(Component)]
+struct CatanRoad {
+    line: Line,
+}
+
+#[derive(Component)]
+struct BuildableCatanRoad {
+    line: Line,
+}
+
+fn update_buildable_roads_spawn(
+    mut roads: Query<(&mut Transform, &mut Sprite, &BuildableCatanRoad)>,
+    catan: Res<Catan>,
 ) {
-    for (entity, mut transform) in texts.iter_mut() {
-        for player in catan.players.iter() {
-            if entity == player.draw.text_id.unwrap() {
-                *transform = player.draw.transform;
-                transform.translation.z = 0.3;
+    for (mut transform, mut sprite, road) in roads.iter_mut() {
+        transform.translation = (catan.points[road.line.start.x][road.line.start.y]
+            + catan.points[road.line.end.x][road.line.end.y])
+            / 2.0;
+        sprite.custom_size = Some(Vec2::new(catan.radius * 0.5, catan.radius));
+        transform.rotation = Quat::from_rotation_z(road_get_rotate(
+            catan.points[road.line.start.x][road.line.start.y],
+            catan.points[road.line.end.x][road.line.end.y],
+        ));
+        sprite.color = Color::rgba(1.0, 1.0, 1.0, 0.5);
+    }
+}
+
+fn despawn_buildable_roads(
+    mut commands: Commands, roads: Query<(Entity, &BuildableCatanRoad)>,
+) {
+    info!("despawn_buildable_roads entity: ");
+    for (entity, _) in roads.iter() {
+        info!("despawn_buildable_roads entity: {:?}", entity);
+        commands.entity(entity).despawn();
+    }
+}
+
+fn spawn_initable_roads(
+    mut commands: Commands, catan: Res<Catan>, image_store: Res<ImageStore>,
+) {
+    for i in 0..catan.points.len() {
+        for j in 0..catan.points[i].len() {
+            let point = Coordinate { x: i, y: j };
+            if let Some(player) = catan.inner.point(point).owner() {
+                if player == catan.me {
+                    for candidate in catan.inner.point_get_points(point) {
+                        if let Some(candidate) = candidate {
+                            let road = Line::new(point, candidate);
+                            if catan.inner.roads().get(&road).is_none() {
+                                commands.spawn((
+                                    BuildableCatanRoad { line: road },
+                                    SpriteBundle {
+                                        texture: image_store.road_img[catan.me].clone(),
+                                        sprite: Sprite {
+                                            custom_size: Some(Vec2::new(0.0, 0.0)),
+                                            ..Default::default()
+                                        },
+                                        ..Default::default()
+                                    },
+                                ));
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 }
+
+fn spawn_buildable_roads(
+    mut commands: Commands, catan: Res<Catan>, image_store: Res<ImageStore>,
+) {
+    for (road, player) in catan.inner.roads() {
+        if *player == catan.me {
+            for candidate in catan.inner.point_get_points(road.start) {
+                if let Some(candidate) = candidate {
+                    let road = Line::new(road.start, candidate);
+                    if catan.inner.roads().get(&road).is_none()
+                        && catan.inner.point_valid(candidate)
+                        && Some(road) != catan.road_building
+                    {
+                        commands.spawn((
+                            BuildableCatanRoad { line: road },
+                            SpriteBundle {
+                                texture: image_store.road_img[catan.me].clone(),
+                                sprite: Sprite {
+                                    custom_size: Some(Vec2::new(0.0, 0.0)),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            },
+                        ));
+                    }
+                }
+            }
+            for candidate in catan.inner.point_get_points(road.end) {
+                if let Some(candidate) = candidate {
+                    let road = Line::new(road.end, candidate);
+                    if catan.inner.roads().get(&road).is_none()
+                        && catan.inner.point_valid(candidate)
+                        && Some(road) != catan.road_building
+                    {
+                        commands.spawn((
+                            BuildableCatanRoad { line: road },
+                            SpriteBundle {
+                                texture: image_store.road_img[catan.me].clone(),
+                                sprite: Sprite {
+                                    custom_size: Some(Vec2::new(0.0, 0.0)),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn update_catan_road_spawn(
+    mut roads: Query<(&mut Transform, &mut Sprite, &CatanRoad)>, catan: Res<Catan>,
+) {
+    for (mut transform, mut sprite, road) in roads.iter_mut() {
+        transform.translation = (catan.points[road.line.start.x][road.line.start.y]
+            + catan.points[road.line.end.x][road.line.end.y])
+            / 2.0;
+        sprite.custom_size = Some(Vec2::new(catan.radius * 0.5, catan.radius));
+        transform.rotation = Quat::from_rotation_z(road_get_rotate(
+            catan.points[road.line.start.x][road.line.start.y],
+            catan.points[road.line.end.x][road.line.end.y],
+        ));
+    }
+}
+
+fn road_get_rotate(start: Vec3, end: Vec3) -> f32 {
+    let x = end.x - start.x;
+    let y = end.y - start.y;
+    if x == 0. {
+        PI / 2.
+    } else {
+        (y / x).atan() + PI / 2.
+    }
+}
+
+fn spawn_catan_road(commands: &mut Commands, road: Line, img: Handle<Image>) {
+    commands.spawn((
+        CatanRoad { line: road },
+        SpriteBundle {
+            texture: img,
+            sprite: Sprite {
+                custom_size: Some(Vec2::new(0.0, 0.0)),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    ));
+}
+
+#[derive(Component)]
+struct CatanHarbor {
+    location: Line,
+}
+
+impl From<Line> for CatanHarbor {
+    fn from(line: Line) -> Self {
+        CatanHarbor { location: line }
+    }
+}
+
+fn update_catan_harbor_spawn(
+    mut harbors: Query<(&mut Transform, &mut Sprite, &CatanHarbor)>, catan: Res<Catan>,
+) {
+    for (mut transform, mut sprite, tile) in harbors.iter_mut() {
+        transform.translation = (catan.points[tile.location.start.x]
+            [tile.location.start.y]
+            + catan.points[tile.location.end.x][tile.location.end.y])
+            / 2.0;
+        sprite.custom_size = Some(Vec2::new(catan.radius * 0.3, catan.radius * 0.3));
+    }
+}
+
+fn spawn_catan_harbor(
+    commands: &mut Commands, catan: &Catan, img_store: &ResMut<ImageStore>,
+) {
+    for (line, kind) in catan.inner.harbors() {
+        commands.spawn((
+            CatanHarbor::from(*line),
+            SpriteBundle {
+                texture: img_store.resource_img[kind].clone(),
+                sprite: Sprite {
+                    custom_size: Some(Vec2::new(0.0, 0.0)),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ));
+    }
+}
+
+fn update_catan_robber_spawn(
+    mut robber: Query<(&mut Transform, &mut Sprite, &CatanRobber)>, catan: Res<Catan>,
+) {
+    for (mut transform, mut sprite, _) in robber.iter_mut() {
+        transform.translation = catan.tiles[catan.inner.robber().x]
+            [catan.inner.robber().y]
+            + Vec3::new(0.0, 0.0, 0.1);
+        sprite.custom_size = Some(Vec2::new(catan.radius * 2.0, catan.radius * 2.0));
+    }
+}
+
+fn update_catan_tiles_spawn(
+    mut tiles: Query<(&mut Transform, &mut Sprite, &CatanTile)>, catan: Res<Catan>,
+    state: Res<State<CatanState>>, card_state: Res<State<UseCardState>>,
+) {
+    for (mut transform, mut sprite, tile) in tiles.iter_mut() {
+        transform.translation = catan.tiles[tile.x][tile.y];
+        sprite.custom_size = Some(Vec2::new(catan.radius * 1.8, catan.radius * 1.8));
+
+        let coord = Coordinate {
+            x: tile.x,
+            y: tile.y,
+        };
+
+        if (state.eq(&CatanState::SelectRobber) || card_state.eq(&UseCardState::Knight))
+            && catan.inner.tile(coord).kind().is_resource()
+        {
+            sprite.color = Color::rgba(1.0, 1.0, 1.0, 0.5);
+        } else {
+            sprite.color = Color::rgba(1.0, 1.0, 1.0, 1.0);
+        }
+    }
+}
+
+fn update_catan_points_spawn(
+    mut tiles: Query<(
+        &mut Transform,
+        &mut Sprite,
+        &mut Handle<Image>,
+        &mut Visibility,
+        &CatanPoint,
+    )>,
+    catan: Res<Catan>, state: Res<State<CatanState>>, img_store: ResMut<ImageStore>,
+) {
+    for (mut transform, mut sprite, mut img, mut visibility, point) in tiles.iter_mut() {
+        *visibility = Visibility::Hidden;
+        transform.translation = catan.points[point.x][point.y];
+        sprite.custom_size = Some(Vec2::new(catan.radius, catan.radius));
+        sprite.color = Color::rgba(1.0, 1.0, 1.0, 1.0);
+
+        let coord = Coordinate {
+            x: point.x,
+            y: point.y,
+        };
+        *img = Handle::default();
+        if catan.inner.point_valid(coord) && catan.inner.point(coord).owner().is_some() {
+            if !catan.inner.point(coord).is_city() {
+                *img = img_store.settlement_img
+                    [catan.inner.point(coord).owner().unwrap()]
+                .clone();
+            } else {
+                *img =
+                    img_store.city_img[catan.inner.point(coord).owner().unwrap()].clone();
+            }
+            *visibility = Visibility::Visible;
+        }
+        if state.eq(&CatanState::BuidSettlement)
+            && catan.inner.point_valid(coord)
+            && catan.inner.point(coord).owner().is_none()
+            && catan.players[catan.me].inner.can_build_settlement()
+            && catan.players[catan.me].inner.have_roads_to(coord)
+            && !catan.inner.point_get_points(coord).iter().any(|&p| {
+                if let Some(p) = p {
+                    catan.inner.point(p).is_owned()
+                } else {
+                    false
+                }
+            })
+        {
+            *img = img_store.settlement_img[catan.me].clone();
+            *visibility = Visibility::Visible;
+            sprite.color = Color::rgba(1.0, 1.0, 1.0, 0.5);
+        } else if state.eq(&CatanState::BuildCity)
+            && catan.inner.point(coord).owner().is_some()
+            && catan.inner.point(coord).owner().unwrap() == catan.me
+            && !catan.inner.point(coord).is_city()
+            && catan.players[catan.me].inner.can_build_city()
+        {
+            *img = img_store.city_img[catan.me].clone();
+            *visibility = Visibility::Visible;
+            sprite.color = Color::rgba(1.0, 1.0, 1.0, 0.5);
+        } else if state.eq(&CatanState::InitSettlement)
+            && catan.inner.point_valid(coord)
+            && catan.inner.point(coord).owner().is_none()
+            && !catan.inner.point_get_points(coord).iter().any(|&p| {
+                if let Some(p) = p {
+                    catan.inner.point(p).is_owned()
+                } else {
+                    false
+                }
+            })
+        {
+            *img = img_store.settlement_img[catan.me].clone();
+            *visibility = Visibility::Visible;
+            sprite.color = Color::rgba(1.0, 1.0, 1.0, 0.5);
+        }
+    }
+}
+
+fn update_catan_tiles_transform(mut catan: ResMut<Catan>, windows: Query<&Window>) {
+    for window in windows.iter() {
+        let board_size = window.width().min(window.height() * 0.7);
+        let translate = Vec3 {
+            x: 0.0,
+            y: window.height() / 2. - board_size / 2.0,
+            z: 0.0,
+        } + Vec3 {
+            x: -board_size / 2.0,
+            y: -board_size / 2.0,
+            z: 0.0,
+        };
+        let radius = board_size
+            / if catan.tiles.len() % 2 == 0 {
+                (catan.tiles.len() * 3 / 2) as f32 + 0.25
+            } else {
+                (catan.tiles.len() * 3 / 2) as f32 + 1.
+            }
+            .max(0.866 * 2. * catan.tiles[0].len() as f32);
+        let x_offset = radius;
+        let y_offset = ((radius * radius - (radius / 2. * radius / 2.)) as f32).sqrt();
+        for i in 0..catan.tiles.len() {
+            for j in 0..catan.tiles[i].len() {
+                if i % 2 == 0 {
+                    catan.tiles[i][j] = Vec3::new(
+                        x_offset + 3. * x_offset * (i / 2) as f32,
+                        y_offset + 2. * y_offset * j as f32,
+                        1.,
+                    ) + translate;
+                } else {
+                    catan.tiles[i][j] = Vec3::new(
+                        2.5 * x_offset as f32 + 3. * x_offset * (i / 2) as f32,
+                        2. * y_offset + 2. * y_offset * j as f32,
+                        1.,
+                    ) + translate;
+                }
+            }
+        }
+
+        for i in 0..catan.points.len() {
+            for j in 0..catan.points[i].len() {
+                if i % 2 == 0 && j % 2 == 0 {
+                    catan.points[i][j] = Vec3::new(
+                        x_offset / 2. + 3. * x_offset * (i / 2) as f32,
+                        y_offset * j as f32,
+                        1.2,
+                    ) + translate;
+                } else if i % 2 == 0 && j % 2 == 1 {
+                    catan.points[i][j] = Vec3::new(
+                        3. * x_offset * (i / 2) as f32,
+                        y_offset * j as f32,
+                        1.2,
+                    ) + translate;
+                } else if i % 2 == 1 && j % 2 == 0 {
+                    catan.points[i][j] = Vec3::new(
+                        x_offset / 2. + x_offset + 3. * x_offset * (i / 2) as f32,
+                        y_offset * j as f32,
+                        1.2,
+                    ) + translate;
+                } else if i % 2 == 1 && j % 2 == 1 {
+                    catan.points[i][j] = Vec3::new(
+                        2. * x_offset + 3. * x_offset * (i / 2) as f32,
+                        y_offset * j as f32,
+                        1.2,
+                    ) + translate;
+                }
+            }
+        }
+        catan.radius = radius;
+    }
+}
+
+fn spawn_catan_tiles(
+    commands: &mut Commands, catan: &mut Catan, img_store: &ResMut<ImageStore>,
+) {
+    for (i, row) in catan.tiles.iter().enumerate() {
+        for (j, _) in row.iter().enumerate() {
+            let coord = Coordinate { x: i, y: j };
+            let kind = catan.inner.tile(coord).kind();
+            if kind != TileKind::Empty {
+                commands
+                    .spawn((
+                        CatanTile::from(coord),
+                        SpriteBundle {
+                            texture: img_store.resource_img
+                                [&catan.inner.tile(coord).kind()]
+                                .clone(),
+                            sprite: Sprite {
+                                custom_size: Some(Vec2::new(0.0, 0.0)),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        },
+                    ))
+                    .with_children(|parent| match catan.inner.tile(coord).number() {
+                        Some(number) => {
+                            parent.spawn(SpriteBundle {
+                                texture: img_store.number_img[number].clone(),
+                                sprite: Sprite {
+                                    custom_size: Some(Vec2::new(0.0, 0.0)),
+                                    ..Default::default()
+                                },
+                                transform: Transform::from_translation(Vec3::new(
+                                    0.0, 0.0, 0.1,
+                                )),
+                                ..Default::default()
+                            });
+                        },
+                        _ => {},
+                    });
+            }
+        }
+    }
+
+    for (i, row) in catan.points.iter().enumerate() {
+        for (j, _) in row.iter().enumerate() {
+            let coord = Coordinate { x: i, y: j };
+            commands.spawn((
+                CatanPoint::from(coord),
+                SpriteBundle {
+                    sprite: Sprite {
+                        custom_size: Some(Vec2::new(0.0, 0.0)),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            ));
+        }
+    }
+    commands.spawn((
+        CatanRobber,
+        SpriteBundle {
+            texture: img_store.robber_img.clone(),
+            sprite: Sprite {
+                custom_size: Some(Vec2::new(0.0, 0.0)),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    ));
+    spawn_catan_harbor(commands, catan, img_store);
+}
+
 fn intialize_game(mut next_state: ResMut<NextState<CatanLoadState>>) {
     next_state.set(CatanLoadState::Loaded);
 }
 
-fn draw_player_board(
-    mut painter: ShapePainter, catan: Res<Catan>, windows: Query<&Window>,
-    img_store: Res<ImageStore>,
-) {
-    for window in windows.iter() {
-        painter.color = Color::rgb(0.0, 0.0, 0.0);
-        let player_card_y_size = window.height() * 0.1;
-        let player_card_x_size =
-            (window.width() - window.height() * 0.2) / catan.players.len() as f32;
-        let board_translate = Vec3 {
-            x: 0.0,
-            y: -window.height() * 0.25,
-            z: 0.0,
-        };
-
-        painter.translate(board_translate);
-        painter.with_children(|child_painter| {
-            child_painter.translate(Vec3 {
-                x: -player_card_y_size / 2.,
-                y: 0.0,
-                z: 0.1,
-            });
-            child_painter.image(
-                img_store.dice_img[catan.dice.0 as usize - 1].clone(),
-                Vec2 {
-                    x: player_card_y_size,
-                    y: player_card_y_size,
-                },
-            );
-            child_painter.translate(Vec3 {
-                x: player_card_y_size,
-                y: 0.0,
-                z: 0.1,
-            });
-            child_painter.image(
-                img_store.dice_img[catan.dice.1 as usize - 1].clone(),
-                Vec2 {
-                    x: player_card_y_size,
-                    y: player_card_y_size,
-                },
-            );
-        });
-    }
-}
-
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, Component)]
+#[repr(C)]
 enum Operation {
     #[default]
     BuildSettlement,
@@ -1205,186 +1177,29 @@ enum Operation {
     EndTurn,
 }
 
-#[derive(Default, Debug, Clone, PartialEq)]
-struct OperationEntry {
-    operation: Operation,
-    translate: Vec3,
-    size: Vec2,
+impl From<usize> for Operation {
+    fn from(value: usize) -> Self {
+        match value {
+            0 => Operation::BuildSettlement,
+            1 => Operation::BuildCity,
+            2 => Operation::BuildRoad,
+            3 => Operation::Trade,
+            4 => Operation::BuyCard,
+            5 => Operation::UseCard,
+            6 => Operation::EndTurn,
+            _ => unreachable!(),
+        }
+    }
 }
 
-#[derive(Resource)]
-struct OperationMenu([OperationEntry; 7]);
-
-fn draw_menu(
-    mut painter: ShapePainter, windows: Query<&Window>, mut menu: ResMut<OperationMenu>,
-    img_store: Res<ImageStore>,
-) {
-    for window in windows.iter() {
-        painter.color = Color::rgb(0.0, 0.0, 0.0);
-        let operation_board_x_size = window.width().min(window.height()) * 0.5;
-        let operation_board_y_size = window.width().min(window.height()) * 0.1;
-
-        let board_translate = Vec3 {
-            x: 0.0,
-            y: -window.height() * 0.45,
-            z: 0.0,
-        };
-
-        painter.translate(board_translate);
-        painter.with_children(|spawn_children| {
-            let config = spawn_children.config().clone();
-            let operation_size = operation_board_x_size / menu.0.len() as f32;
-            let xoffset = -operation_board_x_size / 2. + operation_size * 0.5;
-            for (i, oper) in menu.0.iter_mut().enumerate() {
-                let size = Vec2 {
-                    x: operation_size * 0.95,
-                    y: operation_size * 0.95,
-                };
-                spawn_children.set_config(config.clone());
-                spawn_children.translate(Vec3 {
-                    x: xoffset + operation_size * i as f32,
-                    y: 0.0,
-                    z: 0.1,
-                });
-                spawn_children.color = Color::rgb(0.2, 0.5, 0.5);
-                spawn_children.rect(size);
-                spawn_children.translate(Vec3 {
-                    x: 0.0,
-                    y: 0.0,
-                    z: 0.1,
-                });
-                spawn_children
-                    .image(img_store.operation_img[&oper.operation].clone(), size);
-                oper.translate = spawn_children.transform.translation;
-                oper.size = size;
-            }
-        });
-    }
+#[derive(Default, Debug, Clone, PartialEq)]
+struct OperationEntry {
+    tranform: Transform,
+    size: Vec2,
 }
 
 fn limit_frame(mut settings: ResMut<bevy_framepace::FramepaceSettings>) {
     settings.limiter = bevy_framepace::Limiter::from_framerate(10.0);
-}
-
-fn change_state(
-    keyboard_input: Res<ButtonInput<KeyCode>>, state: Res<State<CatanState>>,
-    mut next_state: ResMut<NextState<CatanState>>,
-) {
-    if keyboard_input.pressed(KeyCode::Space) {
-        match state.get() {
-            CatanState::Wait => {
-                next_state.set(CatanState::Menu);
-            },
-            CatanState::Menu => {
-                next_state.set(CatanState::BuidSettlement);
-            },
-            CatanState::BuidSettlement => {
-                next_state.set(CatanState::BuildCity);
-            },
-            CatanState::BuildCity => {
-                next_state.set(CatanState::BuildRoad);
-            },
-            CatanState::BuildRoad => {
-                next_state.set(CatanState::Trade);
-            },
-            CatanState::Trade => {
-                next_state.set(CatanState::SelectRobber);
-            },
-            CatanState::SelectRobber => {
-                next_state.set(CatanState::Wait);
-            },
-            _ => {},
-        }
-    };
-}
-
-fn check_menu_click(
-    windows: Query<&Window>, mouse_button_input: Res<ButtonInput<MouseButton>>,
-    state: Res<State<CatanState>>, mut next_state: ResMut<NextState<CatanState>>,
-    mut next_trade_state: ResMut<NextState<TradeState>>,
-    mut next_card_state: ResMut<NextState<UseCardState>>, menu: ResMut<OperationMenu>,
-    catan: Res<Catan>, mut trade: ResMut<TradeBoard>,
-    mut action_writer: ConsumableEventWriter<GameAction>,
-) {
-    if mouse_button_input.just_pressed(MouseButton::Left) {
-        // convert the mouse position to the window position
-        if let Some(mouse) = windows.iter().next().unwrap().cursor_position() {
-            let x = mouse.x - windows.iter().next().unwrap().width() / 2.;
-            let y = -(mouse.y - windows.iter().next().unwrap().height() / 2.);
-
-            for i in 0..menu.0.len() {
-                let entry = &menu.0[i];
-                if x > entry.translate.x - entry.size.x / 2.
-                    && x < entry.translate.x + entry.size.x / 2.
-                    && y > entry.translate.y - entry.size.y / 2.
-                    && y < entry.translate.y + entry.size.y / 2.
-                {
-                    match entry.operation {
-                        Operation::BuildSettlement => {
-                            if catan.players[catan.me].inner.can_build_settlement() {
-                                if state.eq(&CatanState::BuidSettlement) {
-                                    next_state.set(CatanState::Menu);
-                                } else {
-                                    next_state.set(CatanState::BuidSettlement);
-                                }
-                            }
-                        },
-                        Operation::BuildCity => {
-                            if catan.players[catan.me].inner.can_build_city() {
-                                if state.eq(&CatanState::BuildCity) {
-                                    next_state.set(CatanState::Menu);
-                                } else {
-                                    next_state.set(CatanState::BuildCity);
-                                }
-                            }
-                        },
-                        Operation::BuildRoad => {
-                            if catan.players[catan.me].inner.can_build_road() {
-                                if state.eq(&CatanState::BuildRoad) {
-                                    next_state.set(CatanState::Menu);
-                                } else {
-                                    next_state.set(CatanState::BuildRoad);
-                                }
-                            }
-                        },
-                        Operation::Trade => {
-                            if catan.players[catan.me].inner.can_trade() {
-                                if state.eq(&CatanState::Trade) {
-                                    next_state.set(CatanState::Menu);
-                                } else {
-                                    next_state.set(CatanState::Trade);
-                                    trade.clear();
-                                    next_trade_state.set(TradeState::Offering);
-                                }
-                            }
-                        },
-                        Operation::BuyCard => {
-                            let me = catan.me;
-                            if catan.players[me].inner.can_buy_development_card() {
-                                action_writer.send(GameAct::BuyDevelopmentCard.into());
-                            }
-                        },
-                        Operation::UseCard => {
-                            if catan.players[catan.me].inner.can_use_development_card()
-                                && !catan.used_card
-                            {
-                                if state.eq(&CatanState::UseDevelopmentCard) {
-                                    next_state.set(CatanState::Menu);
-                                } else {
-                                    next_card_state.set(UseCardState::SelectCard);
-                                    next_state.set(CatanState::UseDevelopmentCard);
-                                }
-                            }
-                        },
-                        Operation::EndTurn => {
-                            next_state.set(CatanState::Wait);
-                            action_writer.send(GameAct::EndTurn.into());
-                        },
-                    }
-                }
-            }
-        }
-    }
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Hash, States)]
@@ -1608,8 +1423,9 @@ fn draw_monopoly(
 }
 
 fn check_development_card_click(
-    windows: Query<&Window>, mouse_button_input: Res<ButtonInput<MouseButton>>,
-    mut catan: ResMut<Catan>, mut next_state: ResMut<NextState<CatanState>>,
+    mut commands: Commands, windows: Query<&Window>, image_store: Res<ImageStore>,
+    mouse_button_input: Res<ButtonInput<MouseButton>>, mut catan: ResMut<Catan>,
+    mut next_state: ResMut<NextState<CatanState>>,
     mut next_card_state: ResMut<NextState<UseCardState>>,
     mut action_writer: ConsumableEventWriter<GameAction>,
 ) {
@@ -1620,7 +1436,7 @@ fn check_development_card_click(
             let y = -(mouse.y - windows.iter().next().unwrap().height() / 2.);
             let card_board_x_size = windows.iter().next().unwrap().width();
             let card_board_y_size = windows.iter().next().unwrap().height() * 0.2;
-            let card_size = card_board_y_size * 0.9;
+            let card_size = card_board_y_size;
             let xoffset = -card_board_x_size / 2. + card_size / 2.;
             for i in 0..catan.players[catan.me].inner.cards.len() {
                 if x > xoffset + card_size * i as f32 - card_size / 2.
@@ -1635,6 +1451,7 @@ fn check_development_card_click(
                         break;
                     } else if i == DevCard::RoadBuilding as usize {
                         next_card_state.set(UseCardState::RoadBuilding);
+                        (&mut commands, &catan, &image_store, false);
                         catan.used_card = true;
                         break;
                     } else if i == DevCard::YearOfPlenty as usize {
@@ -1661,6 +1478,126 @@ fn check_development_card_click(
             }
         }
     }
+}
+
+#[derive(Component)]
+struct CatanDevelopmentCard {
+    kind: DevCard,
+}
+
+#[derive(Component)]
+struct CatanDevelopmentCardCnt;
+
+#[derive(Component)]
+struct CatanUseDevelopmentCard;
+
+fn update_development_card_cnt(
+    windows: Query<&Window>,
+    mut dev_cards: Query<(&mut Sprite, &CatanDevelopmentCardCnt)>,
+) {
+    for window in windows.iter() {
+        let card_board_y_size = window.height() * 0.2;
+        for (mut sprite, _) in dev_cards.iter_mut() {
+            sprite.custom_size =
+                Some(Vec2::new(card_board_y_size / 2.0, card_board_y_size / 2.0));
+        }
+    }
+}
+
+fn update_development_card(
+    windows: Query<&Window>,
+    mut dev_cards: Query<(&mut Transform, &mut Sprite, &CatanDevelopmentCard)>,
+) {
+    for window in windows.iter() {
+        let card_board_x_size = window.width();
+        let card_board_y_size = window.height() * 0.2;
+
+        let board_translate = Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: TRADEBPARD_LAYER,
+        };
+
+        let xoffset = -card_board_x_size / 2. + card_board_y_size / 2.;
+        for (mut transform, mut sprite, dev_card) in dev_cards.iter_mut() {
+            transform.translation = Vec3 {
+                x: xoffset + card_board_y_size * (dev_card.kind as u8) as f32,
+                y: 0.0,
+                z: 0.1,
+            } + board_translate;
+            sprite.custom_size = Some(Vec2::new(card_board_y_size, card_board_y_size));
+        }
+    }
+}
+
+fn update_use_development_card(
+    windows: Query<&Window>,
+    mut dev_cards: Query<(&mut Transform, &mut Sprite, &CatanUseDevelopmentCard)>,
+) {
+    for window in windows.iter() {
+        let card_board_x_size = window.width();
+        let card_board_y_size = window.height() * 0.2;
+
+        let board_translate = Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: TRADEBPARD_LAYER,
+        };
+        let (mut transform, mut sprite, _) = dev_cards.single_mut();
+        transform.translation = board_translate;
+        sprite.custom_size = Some(Vec2::new(card_board_x_size, card_board_y_size));
+    }
+}
+
+fn despawn_use_development_card(
+    mut commands: Commands, roads: Query<(Entity, &CatanUseDevelopmentCard)>,
+) {
+    for (entity, _) in roads.iter() {
+        commands.entity(entity).despawn_recursive();
+    }
+}
+
+fn spawn_use_development_card(
+    mut commands: Commands, catan: Res<Catan>, img_store: Res<ImageStore>,
+) {
+    commands
+        .spawn((
+            CatanUseDevelopmentCard,
+            SpriteBundle {
+                sprite: Sprite {
+                    color: Color::rgba(0.0, 0.0, 0.0, 0.5),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ))
+        .with_children(|command| {
+            for i in 0..catan.players[catan.me].inner.cards.len() {
+                let kind = DevCard::try_from(i as u8).unwrap();
+                command
+                    .spawn((
+                        CatanDevelopmentCard { kind },
+                        SpriteBundle {
+                            texture: img_store.card_img[i].clone(),
+                            ..Default::default()
+                        },
+                    ))
+                    .with_children(|command| {
+                        command.spawn((
+                            CatanDevelopmentCardCnt,
+                            SpriteBundle {
+                                texture: img_store.number_img
+                                    [catan.players[catan.me].inner.cards[i]]
+                                    .clone(),
+                                transform: Transform::from_translation(Vec3::new(
+                                    0.0, 0.0, 0.1,
+                                )),
+                                ..Default::default()
+                            },
+                        ));
+                    });
+            }
+        });
 }
 
 fn draw_development_card(
@@ -1709,14 +1646,47 @@ fn draw_development_card(
     }
 }
 
-fn draw_resource(
-    mut painter: ShapePainter, catan: ResMut<Catan>, windows: Query<&Window>,
-    img_store: Res<ImageStore>,
+#[derive(Component)]
+struct CatanResource {
+    kind: TileKind,
+}
+
+#[derive(Component)]
+struct CatanResourceCnt {
+    kind: TileKind,
+}
+
+fn update_catan_resources_spawn(
+    mut resources: Query<(&mut Transform, &mut Sprite, &CatanResource)>,
+    catan: Res<Catan>,
 ) {
+    for (mut transform, mut sprite, res) in resources.iter_mut() {
+        *transform = catan.resources[res.kind as usize].tranform;
+        sprite.custom_size = Some(catan.resources[res.kind as usize].size);
+    }
+}
+
+fn update_catan_resources_cnt_spawn(
+    mut resources: Query<(
+        &mut Transform,
+        &mut Sprite,
+        &mut Handle<Image>,
+        &CatanResourceCnt,
+    )>,
+    catan: Res<Catan>, img_store: Res<ImageStore>,
+) {
+    for (mut transform, mut sprite, mut img, res_cnt) in resources.iter_mut() {
+        *img = img_store.number_img
+            [catan.players[catan.me].inner.resources[res_cnt.kind as usize]]
+            .clone();
+        *transform = catan.resources[res_cnt.kind as usize].tranform;
+        sprite.custom_size = Some(catan.resources[res_cnt.kind as usize].size);
+    }
+}
+
+fn update_catan_resources_transform(mut catan: ResMut<Catan>, windows: Query<&Window>) {
     for window in windows.iter() {
-        painter.color = Color::rgb(0.0, 0.0, 0.0);
-        let operation_board_x_size = window.width().min(window.height()) * 0.5;
-        let operation_board_y_size = window.width().min(window.height()) * 0.1;
+        let reousece_size = window.width().min(window.height()) * 0.1;
 
         let board_translate = Vec3 {
             x: 0.0,
@@ -1724,47 +1694,282 @@ fn draw_resource(
             z: 0.0,
         };
 
-        painter.translate(board_translate);
-        painter.with_children(|spawn_children| {
-            let config = spawn_children.config().clone();
-            let operation_size = operation_board_x_size
-                / img_store
-                    .resource_img
-                    .iter()
-                    .filter(|res| res.0.is_resource())
-                    .count() as f32;
-            let size = (operation_size * 0.95).min(operation_board_y_size * 0.95);
-            let xoffset = -operation_board_x_size * 0.5 + operation_size * 0.5;
-            let mut i = 0;
-            for j in 0..catan.players[catan.me].inner.resources.len() {
-                let kind = &TileKind::try_from(j as u8).unwrap();
-                if !kind.is_resource() {
-                    continue;
+        let xoffset = -reousece_size * 2.5 + reousece_size * 0.5;
+        let mut i = 0;
+        for (j, resource) in catan.resources.iter_mut().enumerate() {
+            let kind = TileKind::try_from(j as u8).unwrap();
+            if kind.is_resource() {
+                resource.tranform = Transform {
+                    translation: Vec3 {
+                        x: xoffset + reousece_size * i as f32,
+                        y: 0.0,
+                        z: 0.1,
+                    } + board_translate,
+                    ..Default::default()
+                };
+                resource.size = Vec2::new(reousece_size, reousece_size);
+                i += 1;
+            }
+        }
+    }
+}
+
+fn spawn_catan_resource(commands: &mut Commands, tile: TileKind, image: Handle<Image>) {
+    commands.spawn((
+        CatanResource { kind: tile },
+        SpriteBundle {
+            texture: image,
+            sprite: Sprite {
+                custom_size: Some(Vec2::new(0.0, 0.0)),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    ));
+}
+
+fn spawn_catan_resource_cnt(
+    commands: &mut Commands, tile: TileKind, image: Handle<Image>,
+) {
+    commands.spawn((
+        CatanResourceCnt { kind: tile },
+        SpriteBundle {
+            texture: image,
+            sprite: Sprite {
+                custom_size: Some(Vec2::new(0.0, 0.0)),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    ));
+}
+
+fn spawn_catan_resources(
+    commands: &mut Commands, catan: &mut Catan, img_store: &ResMut<ImageStore>,
+) {
+    for j in 0..catan.players[catan.me].inner.resources.len() {
+        let kind = &TileKind::try_from(j as u8).unwrap();
+        catan.resources.push(CatanResourceProperty {
+            tranform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)),
+            size: Vec2::new(0.0, 0.0),
+        });
+        if kind.is_resource() {
+            spawn_catan_resource(commands, *kind, img_store.resource_img[kind].clone());
+            spawn_catan_resource_cnt(commands, *kind, img_store.number_img[0].clone());
+        }
+    }
+}
+
+fn check_menu_click(
+    windows: Query<&Window>, mouse_button_input: Res<ButtonInput<MouseButton>>,
+    state: Res<State<CatanState>>, mut next_state: ResMut<NextState<CatanState>>,
+    mut next_trade_state: ResMut<NextState<TradeState>>,
+    mut next_card_state: ResMut<NextState<UseCardState>>, catan: Res<Catan>,
+    mut trade: ResMut<TradeBoard>, mut action_writer: ConsumableEventWriter<GameAction>,
+) {
+    if mouse_button_input.just_pressed(MouseButton::Left) {
+        // convert the mouse position to the window position
+        if let Some(mouse) = windows.iter().next().unwrap().cursor_position() {
+            let x = mouse.x - windows.iter().next().unwrap().width() / 2.;
+            let y = -(mouse.y - windows.iter().next().unwrap().height() / 2.);
+
+            for i in 0..catan.operations.len() {
+                let entry = &catan.operations[i];
+                if x > entry.tranform.translation.x - entry.size.x / 2.
+                    && x < entry.tranform.translation.x + entry.size.x / 2.
+                    && y > entry.tranform.translation.y - entry.size.y / 2.
+                    && y < entry.tranform.translation.y + entry.size.y / 2.
+                {
+                    match Operation::from(i) {
+                        Operation::BuildSettlement => {
+                            if catan.players[catan.me].inner.can_build_settlement() {
+                                if state.eq(&CatanState::BuidSettlement) {
+                                    next_state.set(CatanState::Menu);
+                                } else {
+                                    next_state.set(CatanState::BuidSettlement);
+                                }
+                            }
+                        },
+                        Operation::BuildCity => {
+                            if catan.players[catan.me].inner.can_build_city() {
+                                if state.eq(&CatanState::BuildCity) {
+                                    next_state.set(CatanState::Menu);
+                                } else {
+                                    next_state.set(CatanState::BuildCity);
+                                }
+                            }
+                        },
+                        Operation::BuildRoad => {
+                            if catan.players[catan.me].inner.can_build_road() {
+                                if state.eq(&CatanState::BuildRoad) {
+                                    next_state.set(CatanState::Menu);
+                                } else {
+                                    next_state.set(CatanState::BuildRoad);
+                                }
+                            }
+                        },
+                        Operation::Trade => {
+                            if catan.players[catan.me].inner.can_trade() {
+                                if state.eq(&CatanState::Trade) {
+                                    next_state.set(CatanState::Menu);
+                                } else {
+                                    next_state.set(CatanState::Trade);
+                                    trade.clear();
+                                    next_trade_state.set(TradeState::Offering);
+                                }
+                            }
+                        },
+                        Operation::BuyCard => {
+                            let me = catan.me;
+                            if catan.players[me].inner.can_buy_development_card() {
+                                action_writer.send(GameAct::BuyDevelopmentCard.into());
+                            }
+                        },
+                        Operation::UseCard => {
+                            if catan.players[catan.me].inner.can_use_development_card()
+                                && !catan.used_card
+                            {
+                                if state.eq(&CatanState::UseDevelopmentCard) {
+                                    next_state.set(CatanState::Menu);
+                                } else {
+                                    next_card_state.set(UseCardState::SelectCard);
+                                    next_state.set(CatanState::UseDevelopmentCard);
+                                }
+                            }
+                        },
+                        Operation::EndTurn => {
+                            next_state.set(CatanState::Wait);
+                            action_writer.send(GameAct::EndTurn.into());
+                        },
+                    }
+                    break;
                 }
-                let res = img_store.resource_img.get(kind).unwrap();
-                let size = Vec2 { x: size, y: size };
-                spawn_children.set_config(config.clone());
-                spawn_children.translate(Vec3 {
+            }
+        }
+    }
+}
+
+fn update_operation_spawn(
+    mut operations: Query<(&mut Transform, &mut Sprite, &Operation)>, catan: Res<Catan>,
+) {
+    for (mut transform, mut sprite, operation) in operations.iter_mut() {
+        *transform = catan.operations[*operation as usize].tranform;
+        sprite.custom_size = Some(catan.operations[*operation as usize].size);
+    }
+}
+
+fn update_operation_transform(mut catan: ResMut<Catan>, windows: Query<&Window>) {
+    for window in windows.iter() {
+        let operation_size = window.width().min(window.height()) * 0.1;
+
+        let board_translate = Vec3 {
+            x: 0.0,
+            y: -window.height() * 0.45,
+            z: 0.0,
+        };
+
+        let xoffset = -operation_size * 3.5 + operation_size * 0.5;
+        for (i, operation) in catan.operations.iter_mut().enumerate() {
+            operation.tranform = Transform {
+                translation: Vec3 {
                     x: xoffset + operation_size * i as f32,
                     y: 0.0,
                     z: 0.1,
-                });
-                spawn_children.image(res.clone(), size);
-                spawn_children.translate(Vec3 {
-                    x: 0.0,
-                    y: 0.0,
-                    z: 0.1,
-                });
-                spawn_children.image(
-                    img_store.number_img
-                        [catan.players[catan.me].inner.resources[*kind as usize]]
-                        .clone(),
-                    Vec2::new(size.x * 0.5, size.y * 0.5),
-                );
-                i += 1;
-            }
+                } + board_translate,
+                ..Default::default()
+            };
+            operation.size = Vec2::new(operation_size, operation_size);
+        }
+    }
+}
+
+fn spawn_operation(
+    commands: &mut Commands, operation: Operation, img_store: &ResMut<ImageStore>,
+) {
+    commands.spawn((
+        operation,
+        SpriteBundle {
+            texture: img_store.operation_img[&operation].clone(),
+            sprite: Sprite {
+                custom_size: Some(Vec2::new(0.0, 0.0)),
+                ..Default::default()
+            },
+            visibility: Visibility::Hidden,
+            ..Default::default()
+        },
+    ));
+}
+
+fn spawn_operations(
+    commands: &mut Commands, catan: &mut Catan, img_store: &ResMut<ImageStore>,
+) {
+    for i in 0..7 {
+        spawn_operation(commands, Operation::from(i), img_store);
+        catan.operations.push(OperationEntry {
+            tranform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)),
+            size: Vec2::new(0.0, 0.0),
         });
     }
+}
+
+#[derive(Component, Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+enum Dice {
+    Dice1,
+    Dice2,
+}
+
+fn update_dices_spawn(
+    mut operations: Query<(&mut Transform, &mut Sprite, &Dice)>, catan: Res<Catan>,
+) {
+    for (mut transform, mut sprite, dice) in operations.iter_mut() {
+        *transform = catan.dices[*dice as usize].tranform;
+        sprite.custom_size = Some(catan.dices[*dice as usize].size);
+    }
+}
+
+fn update_dices_transform(mut catan: ResMut<Catan>, windows: Query<&Window>) {
+    for window in windows.iter() {
+        let board_translate = Vec3 {
+            x: 0.0,
+            y: -window.height() * 0.25,
+            z: 0.0,
+        };
+        let dice_size = window.width().min(window.height()) * 0.1;
+        catan.dices[Dice::Dice1 as usize].tranform =
+            Transform::from_translation(board_translate - Vec3::new(dice_size, 0.0, 0.0));
+        catan.dices[Dice::Dice1 as usize].size = Vec2::new(dice_size, dice_size);
+        catan.dices[Dice::Dice2 as usize].tranform =
+            Transform::from_translation(board_translate + Vec3::new(dice_size, 0.0, 0.0));
+
+        catan.dices[Dice::Dice2 as usize].size = Vec2::new(dice_size, dice_size);
+    }
+}
+
+fn spawn_dices(commands: &mut Commands, _: &mut Catan, img_store: &ResMut<ImageStore>) {
+    commands.spawn((
+        Dice::Dice1,
+        SpriteBundle {
+            texture: img_store.dice_img[1].clone(),
+            sprite: Sprite {
+                custom_size: Some(Vec2::new(0.0, 0.0)),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    ));
+    commands.spawn((
+        Dice::Dice2,
+        SpriteBundle {
+            texture: img_store.dice_img[1].clone(),
+            sprite: Sprite {
+                custom_size: Some(Vec2::new(0.0, 0.0)),
+                ..Default::default()
+            },
+            visibility: Visibility::Hidden,
+            ..Default::default()
+        },
+    ));
 }
 
 #[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -1779,15 +1984,10 @@ enum TradeState {
 
 #[derive(Default)]
 struct TradeBoardDraw {
-    offer: HashMap<TileKind, (Vec3, Vec3)>,
-    want: HashMap<TileKind, (Vec3, Vec3)>,
-    response: HashMap<usize, Vec3>,
-    bank_yes: Vec3,
-    harbor_yes: Vec3,
-    player_yes: Vec3,
-    no: Vec3,
+    offer: HashMap<TileKind, Vec3>,
+    want: HashMap<TileKind, Vec3>,
     button_size: f32,
-    icon_size: f32,
+    trade_size: f32,
 }
 
 #[derive(Default)]
@@ -1812,6 +2012,7 @@ impl TradeBoard {
 
 fn check_trade_confirm_click(
     windows: Query<&Window>, mouse_button_input: Res<ButtonInput<MouseButton>>,
+    players: Query<&TradeTargetPlayerMarker>,
     mut next_trade_state: ResMut<NextState<TradeState>>, trade: Res<TradeBoard>,
     mut action_writer: ConsumableEventWriter<GameAction>,
 ) {
@@ -1821,13 +2022,16 @@ fn check_trade_confirm_click(
             let x = mouse.x - windows.iter().next().unwrap().width() / 2.;
             let y = -(mouse.y - windows.iter().next().unwrap().height() / 2.);
 
-            for yes in trade.draw.response.iter() {
-                if x > yes.1.x - trade.draw.icon_size / 2.0
-                    && x < yes.1.x + trade.draw.icon_size / 2.0
-                    && y > yes.1.y - trade.draw.icon_size / 2.0
-                    && y < yes.1.y + trade.draw.icon_size / 2.0
+            for player in players.iter() {
+                if x > -trade.draw.trade_size / 2.0
+                    && x < trade.draw.trade_size / 2.0
+                    && y > trade.draw.trade_size * (2.0 - (player.id as u8) as f32)
+                    && y < trade.draw.trade_size * (1.0 - (player.id as u8) as f32)
+                    && trade.resource.response.get(&(player.id as usize)).is_some()
+                    && trade.resource.response[&(player.id as usize)]
+                        == TradeResponse::Accept
                 {
-                    action_writer.send(GameAct::TradeConfirm(Some(*yes.0)).into());
+                    action_writer.send(GameAct::TradeConfirm(Some(player.player)).into());
                     next_trade_state.set(TradeState::WaitingConfirm);
                     return;
                 }
@@ -1849,11 +2053,14 @@ fn check_trade_offering_click(
             let x = mouse.x - windows.iter().next().unwrap().width() / 2.;
             let y = -(mouse.y - windows.iter().next().unwrap().height() / 2.);
 
-            for (kind, (add, sub)) in trade.draw.offer.iter() {
-                if x > add.x - trade.draw.button_size
-                    && x < add.x + trade.draw.button_size
-                    && y > add.y - trade.draw.button_size
-                    && y < add.y + trade.draw.button_size
+            for (kind, translate) in trade.draw.offer.iter() {
+                if x > translate.x + trade.draw.trade_size - trade.draw.button_size
+                    && x < translate.x + trade.draw.trade_size + trade.draw.button_size
+                    && y > translate.y + trade.draw.trade_size / 4.0
+                        - trade.draw.button_size
+                    && y < translate.y
+                        + trade.draw.trade_size / 4.0
+                        + trade.draw.button_size
                 {
                     let k = kind.clone();
 
@@ -1866,10 +2073,13 @@ fn check_trade_offering_click(
                     }
                     return;
                 }
-                if x > sub.x - trade.draw.button_size
-                    && x < sub.x + trade.draw.button_size
-                    && y > sub.y - trade.draw.button_size
-                    && y < sub.y + trade.draw.button_size
+                if x > translate.x + trade.draw.trade_size - trade.draw.button_size
+                    && x < translate.x + trade.draw.trade_size + trade.draw.button_size
+                    && y > translate.y
+                        - trade.draw.trade_size / 4.0
+                        - trade.draw.button_size
+                    && y < translate.y - trade.draw.trade_size / 4.0
+                        + trade.draw.button_size
                 {
                     let k = kind.clone();
                     trade.resource.offer[k as usize] =
@@ -1878,11 +2088,14 @@ fn check_trade_offering_click(
                 }
             }
 
-            for (kind, (add, sub)) in trade.draw.want.iter() {
-                if x > add.x - trade.draw.button_size
-                    && x < add.x + trade.draw.button_size
-                    && y > add.y - trade.draw.button_size
-                    && y < add.y + trade.draw.button_size
+            for (kind, translate) in trade.draw.want.iter() {
+                if x > translate.x - trade.draw.trade_size - trade.draw.button_size
+                    && x < translate.x - trade.draw.trade_size + trade.draw.button_size
+                    && y > translate.y + trade.draw.trade_size / 4.0
+                        - trade.draw.button_size
+                    && y < translate.y
+                        + trade.draw.trade_size / 4.0
+                        + trade.draw.button_size
                 {
                     let k = kind.clone();
                     trade.resource.want[k as usize] += 1;
@@ -1890,10 +2103,13 @@ fn check_trade_offering_click(
                         trade.resource.want[k as usize].min(20);
                     return;
                 }
-                if x > sub.x - trade.draw.button_size
-                    && x < sub.x + trade.draw.button_size
-                    && y > sub.y - trade.draw.button_size
-                    && y < sub.y + trade.draw.button_size
+                if x > translate.x - trade.draw.trade_size - trade.draw.button_size
+                    && x < translate.x - trade.draw.trade_size + trade.draw.button_size
+                    && y > translate.y
+                        - trade.draw.trade_size / 4.0
+                        - trade.draw.button_size
+                    && y < translate.y - trade.draw.trade_size / 4.0
+                        + trade.draw.button_size
                 {
                     let k = kind.clone();
                     trade.resource.want[k as usize] =
@@ -1902,10 +2118,10 @@ fn check_trade_offering_click(
                 }
             }
 
-            if x > trade.draw.bank_yes.x - trade.draw.bank_yes.z
-                && x < trade.draw.bank_yes.x + trade.draw.bank_yes.z
-                && y > trade.draw.bank_yes.y - trade.draw.bank_yes.z
-                && y < trade.draw.bank_yes.y + trade.draw.bank_yes.z
+            if x > -trade.draw.trade_size / 2.0
+                && x < trade.draw.trade_size / 2.0
+                && y > trade.draw.trade_size
+                && y < trade.draw.trade_size * 2.0
             {
                 action_writer.send(
                     GameAct::TradeRequest(TradeRequest::new(
@@ -1935,10 +2151,10 @@ fn check_trade_offering_click(
                 return;
             }
 
-            if x > trade.draw.harbor_yes.x - trade.draw.harbor_yes.z
-                && x < trade.draw.harbor_yes.x + trade.draw.harbor_yes.z
-                && y > trade.draw.harbor_yes.y - trade.draw.harbor_yes.z
-                && y < trade.draw.harbor_yes.y + trade.draw.harbor_yes.z
+            if x > -trade.draw.trade_size / 2.0
+                && x < trade.draw.trade_size / 2.0
+                && y > 0.0
+                && y < trade.draw.trade_size
             {
                 action_writer.send(
                     GameAct::TradeRequest(TradeRequest::new(
@@ -1968,10 +2184,10 @@ fn check_trade_offering_click(
                 return;
             }
 
-            if x > trade.draw.player_yes.x - trade.draw.player_yes.z
-                && x < trade.draw.player_yes.x + trade.draw.player_yes.z
-                && y > trade.draw.player_yes.y - trade.draw.player_yes.z
-                && y < trade.draw.player_yes.y + trade.draw.player_yes.z
+            if x > -trade.draw.trade_size / 2.0
+                && x < trade.draw.trade_size / 2.0
+                && y > -trade.draw.trade_size
+                && y < 0.0
             {
                 action_writer.send(
                     GameAct::TradeRequest(TradeRequest::new(
@@ -2001,10 +2217,10 @@ fn check_trade_offering_click(
                 return;
             }
 
-            if x > trade.draw.no.x - trade.draw.no.z
-                && x < trade.draw.no.x + trade.draw.no.z
-                && y > trade.draw.no.y - trade.draw.no.z
-                && y < trade.draw.no.y + trade.draw.no.z
+            if x > -trade.draw.trade_size / 2.0
+                && x < trade.draw.trade_size / 2.0
+                && y > -trade.draw.trade_size * 2.0
+                && y < -trade.draw.trade_size
             {
                 next_state.set(CatanState::Menu);
                 return;
@@ -2024,20 +2240,20 @@ fn check_trade_accepting_click(
             let x = mouse.x - windows.iter().next().unwrap().width() / 2.;
             let y = -(mouse.y - windows.iter().next().unwrap().height() / 2.);
 
-            if x > trade.draw.player_yes.x - trade.draw.player_yes.z
-                && x < trade.draw.player_yes.x + trade.draw.player_yes.z
-                && y > trade.draw.player_yes.y - trade.draw.player_yes.z
-                && y < trade.draw.player_yes.y + trade.draw.player_yes.z
+            if x > -trade.draw.trade_size / 2.0
+                && x < trade.draw.trade_size / 2.0
+                && y > -trade.draw.trade_size
+                && y < 0.0
             {
                 action_writer.send(GameAct::TradeResponse(TradeResponse::Accept).into());
                 next_trade_state.set(TradeState::WaitingConfirm);
                 return;
             }
 
-            if x > trade.draw.no.x - trade.draw.no.z
-                && x < trade.draw.no.x + trade.draw.no.z
-                && y > trade.draw.no.y - trade.draw.no.z
-                && y < trade.draw.no.y + trade.draw.no.z
+            if x > -trade.draw.trade_size / 2.0
+                && x < trade.draw.trade_size / 2.0
+                && y > -trade.draw.trade_size * 2.0
+                && y < -trade.draw.trade_size
             {
                 action_writer.send(GameAct::TradeResponse(TradeResponse::Accept).into());
                 next_trade_state.set(TradeState::WaitingConfirm);
@@ -2047,203 +2263,132 @@ fn check_trade_accepting_click(
     }
 }
 
-fn draw_trade(
-    mut painter: ShapePainter, catan: ResMut<Catan>, windows: Query<&Window>,
-    img_store: Res<ImageStore>, mut trade: ResMut<TradeBoard>,
-    state: Res<State<TradeState>>,
+#[derive(Component)]
+struct TradeMarker;
+
+#[derive(Component)]
+struct TradeResourceMarker {
+    tile: TileKind,
+    is_offer: bool,
+}
+
+#[derive(Component)]
+struct TradeResourceCntMarker {
+    tile: TileKind,
+    is_offer: bool,
+}
+
+#[derive(Component)]
+struct TradeResourceTradeCntMarker {
+    tile: TileKind,
+    is_offer: bool,
+}
+
+#[derive(Component)]
+struct TradeAddMarker {
+    is_offer: bool,
+}
+
+#[derive(Component)]
+struct TradeSubMarker {
+    is_offer: bool,
+}
+
+#[derive(Component, Copy, Clone)]
+#[repr(u8)]
+enum TradeOption {
+    Bank,
+    Harbor,
+    Player,
+    Cancel,
+}
+
+#[derive(Component, Copy, Clone)]
+struct TradeTargetPlayerMarker {
+    id: usize,
+    player: usize,
+}
+
+#[derive(Component)]
+struct TradeResponseMarker {
+    player: usize,
+}
+
+fn update_trade_response_spawn(
+    mut resources: Query<(
+        &mut Transform,
+        &mut Sprite,
+        &mut Visibility,
+        &mut Handle<Image>,
+        &TradeResponseMarker,
+    )>,
+    trade: Res<TradeBoard>, state: Res<State<TradeState>>, img_store: Res<ImageStore>,
 ) {
-    for window in windows.iter() {
-        painter.color = Color::rgb(0.0, 0.0, 0.0);
-        let trade_board_size = window.width().min(window.height()) * 0.8;
-        painter.translate(Vec3 {
-            x: 0.0,
-            y: 0.0,
-            z: TRADEBPARD_LAYER,
-        });
-        painter
-            .rect(Vec2 {
-                x: trade_board_size,
-                y: trade_board_size,
-            })
-            .with_children(|spawn_children| {
-                let config = spawn_children.config().clone();
-                let trade_size = trade_board_size
-                    / img_store
-                        .resource_img
-                        .iter()
-                        .filter(|res| res.0.is_resource())
-                        .count() as f32;
-                let mut i = 0;
-                for j in 0..catan.players[catan.me].inner.resources.len() {
-                    let kind = &TileKind::try_from(j as u8).unwrap();
-                    if !kind.is_resource() {
-                        continue;
-                    }
-                    let res = img_store.resource_img.get(kind).unwrap();
-                    let size = Vec2 {
-                        x: trade_size,
-                        y: trade_size,
-                    };
+    for (mut transform, mut sprite, mut visibility, mut img, response) in
+        resources.iter_mut()
+    {
+        transform.translation = Vec3::new(0.0, -trade.draw.trade_size * 0.5, 0.1);
+        sprite.custom_size = Some(Vec2::new(
+            trade.draw.trade_size * 0.5,
+            trade.draw.trade_size * 0.5,
+        ));
 
-                    //offer
-                    let translate = Vec3 {
-                        x: -trade_board_size / 2. + trade_size / 2 as f32,
-                        y: trade_board_size / 2.
-                            - trade_size / 2.
-                            - trade_size * i as f32,
-                        z: 0.1,
-                    };
-                    spawn_children.set_config(config.clone());
-                    spawn_children.translate(translate);
-                    spawn_children.image(res.clone(), size);
-                    spawn_children.translate(Vec3 {
-                        x: 0.0,
-                        y: 0.0,
-                        z: 0.1,
-                    });
-                    spawn_children.image(
-                        img_store.number_img[(catan.players[catan.me].inner.resources
-                            [*kind as usize])
-                            .min(20)]
-                        .clone(),
-                        Vec2::new(size.x * 0.5, size.y * 0.5),
-                    );
-                    if state.eq(&TradeState::Offering) {
-                        //add
-                        spawn_children.set_config(config.clone());
-                        spawn_children.translate(
-                            Vec3 {
-                                x: trade_size,
-                                y: trade_size / 4.,
-                                z: 0.,
-                            } + translate,
-                        );
-                        spawn_children.image(
-                            img_store.add.clone(),
-                            Vec2::new(size.x * 0.5, size.y * 0.5),
-                        );
-                        let add_translate = spawn_children.transform.translation;
+        if state.eq(&TradeState::Offering)
+            || state.eq(&TradeState::Accepting)
+            || trade.resource.response.get(&response.player).is_none()
+        {
+            *visibility = Visibility::Hidden;
+        } else {
+            *visibility = Visibility::Visible;
+            *img = match trade.resource.response[&response.player] {
+                TradeResponse::Accept => img_store.yes.clone(),
+                TradeResponse::Reject => img_store.no.clone(),
+            }
+        }
+    }
+}
 
-                        //sub
-                        spawn_children.set_config(config.clone());
-                        spawn_children.translate(
-                            Vec3 {
-                                x: trade_size,
-                                y: -trade_size / 4.,
-                                z: 0.,
-                            } + translate,
-                        );
-                        spawn_children.image(
-                            img_store.sub.clone(),
-                            Vec2::new(size.x * 0.5, size.y * 0.5),
-                        );
-                        let sub_translate = spawn_children.transform.translation;
-                        trade
-                            .draw
-                            .offer
-                            .insert(*kind, (add_translate, sub_translate));
-                    }
-                    //count
-                    spawn_children.set_config(config.clone());
-                    spawn_children.translate(
-                        Vec3 {
-                            x: trade_size * 1.25,
-                            y: 0.,
-                            z: 0.1,
-                        } + translate,
-                    );
-                    spawn_children.image(
-                        img_store.number_img
-                            [(trade.resource.offer[*kind as usize] as usize).min(20)]
-                        .clone(),
-                        Vec2::new(size.x * 0.5, size.y * 0.5),
-                    );
+fn update_trade_target_player_spawn(
+    mut resources: Query<(
+        &mut Transform,
+        &mut Sprite,
+        &mut Visibility,
+        &TradeTargetPlayerMarker,
+    )>,
+    trade: Res<TradeBoard>, state: Res<State<TradeState>>,
+) {
+    for (mut transform, mut sprite, mut visibility, player) in resources.iter_mut() {
+        transform.translation = Vec3::new(
+            0.0,
+            trade.draw.trade_size * (1.5 - (player.id as u8) as f32),
+            0.1,
+        );
+        sprite.custom_size =
+            Some(Vec2::new(trade.draw.trade_size, trade.draw.trade_size));
+        if state.eq(&TradeState::Offering) || state.eq(&TradeState::Accepting) {
+            *visibility = Visibility::Hidden;
+        } else {
+            *visibility = Visibility::Visible;
+        }
+    }
+}
 
-                    //want
-                    let translate = Vec3 {
-                        x: trade_board_size / 2. - trade_size / 2 as f32,
-                        y: trade_board_size / 2.
-                            - trade_size / 2.
-                            - trade_size * i as f32,
-                        z: 0.1,
-                    };
-                    spawn_children.set_config(config.clone());
-                    spawn_children.translate(translate);
-                    spawn_children.image(res.clone(), size);
-                    spawn_children.translate(Vec3 {
-                        x: 0.0,
-                        y: 0.0,
-                        z: 0.1,
-                    });
-                    spawn_children.image(
-                        img_store.number_img[(catan.players[catan.me].inner.resources
-                            [*kind as usize])
-                            .min(20)]
-                        .clone(),
-                        Vec2::new(size.x * 0.5, size.y * 0.5),
-                    );
-                    if state.eq(&TradeState::Offering) {
-                        //add
-                        spawn_children.set_config(config.clone());
-                        spawn_children.translate(
-                            Vec3 {
-                                x: -trade_size,
-                                y: trade_size / 4.,
-                                z: 0.,
-                            } + translate,
-                        );
-                        spawn_children.image(
-                            img_store.add.clone(),
-                            Vec2::new(size.x * 0.5, size.y * 0.5),
-                        );
-                        let add_translate = spawn_children.transform.translation;
-
-                        //sub
-                        spawn_children.set_config(config.clone());
-                        spawn_children.translate(
-                            Vec3 {
-                                x: -trade_size,
-                                y: -trade_size / 4.,
-                                z: 0.,
-                            } + translate,
-                        );
-                        spawn_children.image(
-                            img_store.sub.clone(),
-                            Vec2::new(size.x * 0.5, size.y * 0.5),
-                        );
-                        let sub_translate = spawn_children.transform.translation;
-                        trade
-                            .draw
-                            .want
-                            .insert(*kind, (add_translate, sub_translate));
-                    }
-                    //count
-                    spawn_children.set_config(config.clone());
-                    spawn_children.translate(
-                        Vec3 {
-                            x: -trade_size * 1.25,
-                            y: 0.,
-                            z: 0.1,
-                        } + translate,
-                    );
-                    spawn_children.image(
-                        img_store.number_img
-                            [(trade.resource.want[*kind as usize] as usize).min(20)]
-                        .clone(),
-                        Vec2::new(size.x * 0.5, size.y * 0.5),
-                    );
-                    trade.draw.button_size = trade_size * 0.25;
-                    i += 1;
-                }
-
-                if state.eq(&TradeState::Offering) {
-                    spawn_children.set_config(config.clone());
-                    spawn_children.translate(Vec3 {
-                        x: 0.,
-                        y: trade_size * 1.5, // * 2.,
-                        z: 0.1,
-                    });
-                    if catan
+fn update_trade_option_spawn(
+    mut resources: Query<(&mut Transform, &mut Sprite, &mut Visibility, &TradeOption)>,
+    trade: Res<TradeBoard>, catan: Res<Catan>, state: Res<State<TradeState>>,
+) {
+    for (mut transform, mut sprite, mut visibility, option) in resources.iter_mut() {
+        transform.translation = Vec3::new(
+            0.0,
+            trade.draw.trade_size * (1.5 - (*option as u8) as f32),
+            0.1,
+        );
+        sprite.custom_size =
+            Some(Vec2::new(trade.draw.trade_size, trade.draw.trade_size));
+        match option {
+            TradeOption::Bank => {
+                if state.eq(&TradeState::Offering)
+                    && catan
                         .inner
                         .check_valid_local_trade(
                             &Trade {
@@ -2280,21 +2425,15 @@ fn draw_trade(
                             &catan.players[catan.me].inner,
                         )
                         .is_ok()
-                    {
-                        spawn_children.image(
-                            img_store.bank_img.clone(),
-                            Vec2::new(trade_size, trade_size),
-                        );
-                    }
-                    trade.draw.bank_yes = spawn_children.transform.translation;
-                    trade.draw.bank_yes.z = trade_size / 2.;
-                    spawn_children.translate(Vec3 {
-                        x: 0.,
-                        y: -trade_size, // * 2.,
-                        z: 0.0,
-                    });
-
-                    if catan
+                {
+                    *visibility = Visibility::Visible;
+                } else {
+                    *visibility = Visibility::Hidden;
+                }
+            },
+            TradeOption::Harbor => {
+                if state.eq(&TradeState::Offering)
+                    && catan
                         .inner
                         .check_valid_local_trade(
                             &Trade {
@@ -2331,112 +2470,330 @@ fn draw_trade(
                             &catan.players[catan.me].inner,
                         )
                         .is_ok()
-                    {
-                        spawn_children.image(
-                            img_store.harbor_img.clone(),
-                            Vec2::new(trade_size, trade_size),
-                        );
-                    }
-                    trade.draw.harbor_yes = spawn_children.transform.translation;
-                    trade.draw.harbor_yes.z = trade_size / 2.;
-
-                    spawn_children.translate(Vec3 {
-                        x: 0.,
-                        y: -trade_size, // * 2.,
-                        z: 0.0,
-                    });
-                    spawn_children
-                        .image(img_store.yes.clone(), Vec2::new(trade_size, trade_size));
-                    trade.draw.player_yes = spawn_children.transform.translation;
-                    trade.draw.player_yes.z = trade_size / 2.;
-                    spawn_children.translate(Vec3 {
-                        x: 0.,
-                        y: -trade_size, // * 2.,
-                        z: 0.0,
-                    });
-                    spawn_children
-                        .image(img_store.no.clone(), Vec2::new(trade_size, trade_size));
-                    trade.draw.no = spawn_children.transform.translation;
-                    trade.draw.no.z = trade_size / 2.;
-                } else if state.eq(&TradeState::Accepting) {
-                    spawn_children.set_config(config.clone());
-                    spawn_children.translate(Vec3 {
-                        x: 0.,
-                        y: trade_size / 2., // * 2.,
-                        z: 0.1,
-                    });
-                    spawn_children
-                        .image(img_store.yes.clone(), Vec2::new(trade_size, trade_size));
-                    trade.draw.player_yes = spawn_children.transform.translation;
-                    trade.draw.player_yes.z = trade_size / 2.;
-                    spawn_children.translate(Vec3 {
-                        x: 0.,
-                        y: -trade_size, // * 2.,
-                        z: 0.1,
-                    });
-                    spawn_children
-                        .image(img_store.no.clone(), Vec2::new(trade_size, trade_size));
-                    trade.draw.no = spawn_children.transform.translation;
-                    trade.draw.no.z = trade_size / 2.;
-                } else if state.eq(&TradeState::WaitingResponse)
-                    || state.eq(&TradeState::Confirming)
                 {
-                    let icon_size = trade_size * 0.8;
-
-                    trade.draw.icon_size = icon_size;
-                    spawn_children.set_config(config.clone());
-                    spawn_children.translate(Vec3 {
-                        x: 0.,
-                        y: 0.,
-                        z: 0.1,
-                    });
-
-                    let i = 0;
-                    for id in 0..catan.players.len() {
-                        if id != catan.me {
-                            spawn_children.set_config(config.clone());
-                            spawn_children.translate(Vec3 {
-                                x: 0.,
-                                y: trade_size / 2.
-                                    - icon_size / 2.
-                                    - icon_size * i as f32,
-                                z: 0.1,
-                            });
-                            spawn_children.image(
-                                img_store.settlement_img[id].clone(),
-                                Vec2::new(icon_size, icon_size),
-                            );
-                            spawn_children.translate(Vec3 {
-                                x: 0.,
-                                y: -icon_size / 2.,
-                                z: 0.1,
-                            });
-                            match trade.resource.response.get(&id) {
-                                Some(TradeResponse::Accept) => {
-                                    trade
-                                        .draw
-                                        .response
-                                        .insert(id, spawn_children.transform.translation);
-
-                                    spawn_children.image(
-                                        img_store.yes.clone(),
-                                        Vec2::new(icon_size * 0.4, icon_size * 0.4),
-                                    );
-                                },
-
-                                Some(TradeResponse::Reject) => {
-                                    spawn_children.image(
-                                        img_store.no.clone(),
-                                        Vec2::new(icon_size * 0.4, icon_size * 0.4),
-                                    );
-                                },
-                                None => {},
-                            }
-                        }
-                    }
+                    *visibility = Visibility::Visible;
+                } else {
+                    *visibility = Visibility::Hidden;
                 }
-            });
+            },
+            _ => {
+                if state.eq(&TradeState::Offering) || state.eq(&TradeState::Accepting) {
+                    *visibility = Visibility::Visible;
+                } else {
+                    *visibility = Visibility::Hidden;
+                }
+            },
+        }
     }
+}
+
+fn update_resource_trade_cnt_marker_spawn(
+    mut resources: Query<(
+        &mut Transform,
+        &mut Sprite,
+        &mut Handle<Image>,
+        &TradeResourceTradeCntMarker,
+    )>,
+    trade_board: Res<TradeBoard>, img_store: Res<ImageStore>,
+) {
+    for (mut transform, mut sprite, mut img, res) in resources.iter_mut() {
+        if res.is_offer {
+            transform.translation = Vec3 {
+                x: trade_board.draw.trade_size * 1.25,
+                y: 0.,
+                z: 0.1,
+            };
+            *img = img_store.number_img
+                [trade_board.resource.offer[res.tile as usize] as usize]
+                .clone();
+        } else {
+            transform.translation = Vec3 {
+                x: -trade_board.draw.trade_size * 1.25,
+                y: 0.,
+                z: 0.1,
+            };
+            *img = img_store.number_img
+                [trade_board.resource.want[res.tile as usize] as usize]
+                .clone();
+        }
+        sprite.custom_size = Some(Vec2::new(
+            trade_board.draw.trade_size * 0.5,
+            trade_board.draw.trade_size * 0.5,
+        ));
+    }
+}
+
+fn update_resource_sub_marker_spawn(
+    mut resources: Query<(&mut Transform, &mut Sprite, &TradeSubMarker)>,
+    trade_board: Res<TradeBoard>,
+) {
+    for (mut transform, mut sprite, res) in resources.iter_mut() {
+        if res.is_offer {
+            transform.translation = Vec3 {
+                x: trade_board.draw.trade_size,
+                y: -trade_board.draw.trade_size / 4.,
+                z: 0.,
+            };
+        } else {
+            transform.translation = Vec3 {
+                x: -trade_board.draw.trade_size,
+                y: -trade_board.draw.trade_size / 4.,
+                z: 0.,
+            };
+        }
+        sprite.custom_size = Some(Vec2::new(
+            trade_board.draw.trade_size * 0.5,
+            trade_board.draw.trade_size * 0.5,
+        ));
+    }
+}
+
+fn update_resource_add_marker_spawn(
+    mut resources: Query<(&mut Transform, &mut Sprite, &TradeAddMarker)>,
+    trade_board: Res<TradeBoard>,
+) {
+    for (mut transform, mut sprite, res) in resources.iter_mut() {
+        if res.is_offer {
+            transform.translation = Vec3 {
+                x: trade_board.draw.trade_size,
+                y: trade_board.draw.trade_size / 4.,
+                z: 0.,
+            };
+        } else {
+            transform.translation = Vec3 {
+                x: -trade_board.draw.trade_size,
+                y: trade_board.draw.trade_size / 4.,
+                z: 0.,
+            };
+        }
+        sprite.custom_size = Some(Vec2::new(
+            trade_board.draw.trade_size * 0.5,
+            trade_board.draw.trade_size * 0.5,
+        ));
+    }
+}
+
+fn update_resource_cnt_marker_spawn(
+    mut resources: Query<(&mut Sprite, &mut Handle<Image>, &TradeResourceCntMarker)>,
+    trade_board: Res<TradeBoard>, catan: Res<Catan>, img_store: Res<ImageStore>,
+) {
+    for (mut sprite, mut img, res) in resources.iter_mut() {
+        if res.is_offer {
+            *img = img_store.number_img
+                [catan.players[catan.me].inner.resources[res.tile as usize] as usize]
+                .clone();
+        } else {
+            *img = img_store.number_img
+                [catan.players[catan.me].inner.resources[res.tile as usize] as usize]
+                .clone();
+        }
+        sprite.custom_size = Some(Vec2::new(
+            trade_board.draw.trade_size * 0.5,
+            trade_board.draw.trade_size * 0.5,
+        ));
+    }
+}
+
+fn update_resource_marker_spawn(
+    mut resources: Query<(&mut Transform, &mut Sprite, &TradeResourceMarker)>,
+    trade_board: Res<TradeBoard>,
+) {
+    for (mut transform, mut sprite, res) in resources.iter_mut() {
+        if res.is_offer {
+            transform.translation = trade_board.draw.offer[&res.tile];
+        } else {
+            transform.translation = trade_board.draw.want[&res.tile];
+        }
+        sprite.custom_size = Some(Vec2::new(
+            trade_board.draw.trade_size,
+            trade_board.draw.trade_size,
+        ));
+    }
+}
+
+fn update_trade_spawn(
+    mut trade: Query<(&mut Transform, &mut Sprite, &TradeMarker)>,
+    windows: Query<&Window>, catan: Res<Catan>, mut trade_board: ResMut<TradeBoard>,
+) {
+    for window in windows.iter() {
+        let trade_board_size = window.width().min(window.height()) * 0.8;
+
+        trade.single_mut().1.custom_size =
+            Some(Vec2::new(trade_board_size, trade_board_size));
+        let trade_size = trade_board_size
+            / catan.players[catan.me]
+                .inner
+                .resources
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| TileKind::try_from(*i as u8).unwrap().is_resource())
+                .count() as f32;
+        let mut i = 0;
+        for j in 0..catan.players[catan.me].inner.resources.len() {
+            let kind = &TileKind::try_from(j as u8).unwrap();
+            if !kind.is_resource() {
+                continue;
+            }
+            trade_board.draw.offer.insert(
+                *kind,
+                Vec3 {
+                    x: -trade_board_size / 2. + trade_size / 2 as f32,
+                    y: trade_board_size / 2. - trade_size / 2. - trade_size * i as f32,
+                    z: 0.1,
+                },
+            );
+            trade_board.draw.want.insert(
+                *kind,
+                Vec3 {
+                    x: trade_board_size / 2. - trade_size / 2 as f32,
+                    y: trade_board_size / 2. - trade_size / 2. - trade_size * i as f32,
+                    z: 0.1,
+                },
+            );
+            i += 1;
+        }
+        trade_board.draw.trade_size = trade_size;
+        trade_board.draw.button_size = trade_size / 4.0;
+    }
+}
+
+fn spawn_trade_entry(
+    command: &mut ChildBuilder, kind: TileKind, is_offer: bool,
+    img_store: &Res<ImageStore>,
+) {
+    command
+        .spawn((
+            TradeResourceMarker {
+                tile: kind,
+                is_offer,
+            },
+            SpriteBundle {
+                texture: img_store.resource_img.get(&kind).unwrap().clone(),
+                transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.1)),
+                ..Default::default()
+            },
+        ))
+        .with_children(|command| {
+            command.spawn((
+                TradeResourceCntMarker {
+                    tile: kind,
+                    is_offer,
+                },
+                SpriteBundle {
+                    texture: img_store.number_img[0].clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.1)),
+                    ..Default::default()
+                },
+            ));
+            command.spawn((
+                TradeAddMarker { is_offer },
+                SpriteBundle {
+                    texture: img_store.add.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.1)),
+                    ..Default::default()
+                },
+            ));
+            command.spawn((
+                TradeSubMarker { is_offer },
+                SpriteBundle {
+                    texture: img_store.sub.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.1)),
+                    ..Default::default()
+                },
+            ));
+            command.spawn((
+                TradeResourceTradeCntMarker {
+                    tile: kind,
+                    is_offer,
+                },
+                SpriteBundle {
+                    texture: img_store.number_img[0].clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.1)),
+                    ..Default::default()
+                },
+            ));
+        });
+}
+
+fn despawn_trade(mut commands: Commands, trade: Query<(Entity, &TradeMarker)>) {
+    for (entity, _) in trade.iter() {
+        commands.entity(entity).despawn_recursive();
+    }
+}
+
+fn spawn_trade(mut command: Commands, catan: ResMut<Catan>, img_store: Res<ImageStore>) {
+    command
+        .spawn((
+            TradeMarker,
+            SpriteBundle {
+                sprite: Sprite {
+                    color: Color::rgba(0.0, 0.0, 0.0, 0.9),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ))
+        .with_children(|command| {
+            for j in 0..catan.players[catan.me].inner.resources.len() {
+                let kind = &TileKind::try_from(j as u8).unwrap();
+                if kind.is_resource() {
+                    spawn_trade_entry(command, *kind, true, &img_store);
+                    spawn_trade_entry(command, *kind, false, &img_store);
+                }
+            }
+            let mut id = 0;
+            for i in 0..catan.players.len() {
+                if i != catan.me {
+                    command
+                        .spawn((
+                            TradeTargetPlayerMarker { id, player: i },
+                            SpriteBundle {
+                                texture: img_store.settlement_img[i].clone(),
+                                ..Default::default()
+                            },
+                        ))
+                        .with_children(|command| {
+                            command.spawn((
+                                TradeResponseMarker { player: i },
+                                SpriteBundle {
+                                    texture: img_store.number_img[0].clone(),
+                                    ..Default::default()
+                                },
+                            ));
+                        });
+                    id += 1;
+                }
+            }
+
+            command.spawn((
+                TradeOption::Bank,
+                SpriteBundle {
+                    texture: img_store.bank_img.clone(),
+                    ..Default::default()
+                },
+            ));
+            command.spawn((
+                TradeOption::Harbor,
+                SpriteBundle {
+                    texture: img_store.harbor_img.clone(),
+                    ..Default::default()
+                },
+            ));
+            command.spawn((
+                TradeOption::Player,
+                SpriteBundle {
+                    texture: img_store.yes.clone(),
+                    ..Default::default()
+                },
+            ));
+            command.spawn((
+                TradeOption::Cancel,
+                SpriteBundle {
+                    texture: img_store.no.clone(),
+                    ..Default::default()
+                },
+            ));
+        });
 }
 
 #[derive(Default)]
@@ -2881,7 +3238,7 @@ fn loading(
         info!("event: {:?}", event.deref());
         match event.consume().into() {
             GameMsg::GameStart(start) => {
-                let catan = Catan::new(start.clone());
+                let mut catan = Catan::new(start.clone());
 
                 let settlment_img = img_store.settlement_img[catan.me as usize].clone();
                 let city_img = img_store.city_img[catan.me as usize].clone();
@@ -2897,6 +3254,10 @@ fn loading(
                     .operation_img
                     .insert(Operation::BuildRoad, road_img);
 
+                spawn_catan_tiles(&mut commands, &mut catan, &img_store);
+                spawn_catan_resources(&mut commands, &mut catan, &img_store);
+                spawn_operations(&mut commands, &mut catan, &img_store);
+                spawn_dices(&mut commands, &mut catan, &img_store);
                 commands.insert_resource(catan);
                 next_state.set(CatanLoadState::Initialzing);
                 break;
@@ -2953,242 +3314,260 @@ impl From<GameAct> for GameAction {
 }
 
 fn process_event(
-    mut catan: ResMut<Catan>, mut trade: ResMut<TradeBoard>,
-    trade_state: Res<State<TradeState>>, mut next_state: ResMut<NextState<CatanState>>,
+    mut commands: Commands, img_store: ResMut<ImageStore>, mut catan: ResMut<Catan>,
+    mut trade: ResMut<TradeBoard>, trade_state: Res<State<TradeState>>,
+    state: Res<State<CatanState>>, mut next_state: ResMut<NextState<CatanState>>,
     mut next_trade_state: ResMut<NextState<TradeState>>,
     mut event_reader: ConsumableEventReader<GameEvent>,
     mut action_writer: ConsumableEventWriter<GameAction>,
 ) {
-    for event in event_reader.read() {
-        info!("event: {:?}", event.deref());
-        match event.consume().into() {
-            GameMsg::PlayerInit(player) => {
-                if player == catan.me {
-                    next_state.set(CatanState::InitSettlement);
-                    break;
-                }
-            },
-            GameMsg::PlayerTurn(player) => {
-                catan.current_turn = player;
-                if player == catan.me {
-                    next_state.set(CatanState::Menu);
-                    catan.used_card = false;
-                    break;
-                } else {
-                    next_state.set(CatanState::Wait);
-                    break;
-                }
-            },
-            GameMsg::PlayerRollDice((dice1, dice2)) => {
-                catan.dice = (dice1, dice2);
-            },
-            GameMsg::PlayerBuildRoad(build) => {
-                catan.inner.add_road(build.player, build.road);
-                catan.players[build.player].inner.add_road(build.road);
-                if build.player != catan.me {
-                    let _ = catan.players[build.player].inner.resources
-                        [TileKind::Brick as usize]
-                        .saturating_sub(1);
-                    let _ = catan.players[build.player].inner.resources
-                        [TileKind::Wood as usize]
-                        .saturating_sub(1);
-                }
-            },
-            GameMsg::PlayerBuildSettlement(build) => {
-                catan.inner.add_settlement(build.player, build.point);
-                if build.player == catan.me {
-                    catan.players[build.player].inner.settlement_left -= 1;
-                } else {
-                    let _ = catan.players[build.player].inner.resources
-                        [TileKind::Brick as usize]
-                        .saturating_sub(1);
-                    let _ = catan.players[build.player].inner.resources
-                        [TileKind::Grain as usize]
-                        .saturating_sub(1);
-                    let _ = catan.players[build.player].inner.resources
-                        [TileKind::Wood as usize]
-                        .saturating_sub(1);
-                    let _ = catan.players[build.player].inner.resources
-                        [TileKind::Wool as usize]
-                        .saturating_sub(1);
-                }
-            },
-            GameMsg::PlayerBuildCity(build) => {
-                assert_eq!(catan.current_turn, build.player);
-                catan.inner.add_city(build.player, build.point);
-                if build.player == catan.me {
-                    catan.players[build.player].inner.city_left -= 1;
-                    catan.players[build.player].inner.settlement_left += 1;
-                } else {
-                    let _ = catan.players[build.player].inner.resources
-                        [TileKind::Grain as usize]
-                        .saturating_sub(2);
-                    let _ = catan.players[build.player].inner.resources
-                        [TileKind::Stone as usize]
-                        .saturating_sub(3);
-                }
-            },
-            GameMsg::PlayerBuyDevelopmentCard(buy) => {
-                assert_eq!(catan.current_turn, buy.player);
-                if buy.player == catan.me {
-                    catan.players[buy.player].inner.resources
-                        [TileKind::Stone as usize] -= 1;
-                    catan.players[buy.player].inner.resources
-                        [TileKind::Grain as usize] -= 1;
-                    catan.players[buy.player].inner.resources[TileKind::Wool as usize] -=
-                        1;
-                    catan.players[buy.player].inner.add_card(buy.card);
-                } else {
-                    catan.players[buy.player].inner.add_card(None);
-                    let _ = catan.players[buy.player].inner.resources
-                        [TileKind::Grain as usize]
-                        .saturating_sub(1);
-                    let _ = catan.players[buy.player].inner.resources
-                        [TileKind::Wool as usize]
-                        .saturating_sub(1);
-                    let _ = catan.players[buy.player].inner.resources
-                        [TileKind::Stone as usize]
-                        .saturating_sub(1);
-                }
-            },
-            GameMsg::PlayerUseDevelopmentCard(use_card) => {
-                assert_eq!(catan.current_turn, use_card.player);
-                if use_card.player == catan.me {
-                    catan.players[use_card.player]
-                        .inner
-                        .remove_card(Some(use_card.card));
-                } else {
-                    catan.players[use_card.player].inner.remove_card(None);
-                }
+    if state.eq(&CatanState::Menu)
+        || state.eq(&CatanState::Wait)
+        || state.eq(&CatanState::Trade)
+    {
+        for event in event_reader.read() {
+            info!("event: {:?}", event.deref());
+            match event.consume().into() {
+                GameMsg::PlayerInit(player) => {
+                    if player == catan.me {
+                        next_state.set(CatanState::InitSettlement);
+                        break;
+                    }
+                },
+                GameMsg::PlayerTurn(player) => {
+                    catan.current_turn = player;
+                    if player == catan.me {
+                        next_state.set(CatanState::Menu);
+                        catan.used_card = false;
+                        break;
+                    } else {
+                        next_state.set(CatanState::Wait);
+                        break;
+                    }
+                },
+                GameMsg::PlayerRollDice((dice1, dice2)) => {
+                    catan.dices[0].nubmer = dice1;
+                    catan.dices[1].nubmer = dice2;
+                },
+                GameMsg::PlayerBuildRoad(build) => {
+                    catan.inner.add_road(build.player, build.road);
+                    catan.players[build.player].inner.add_road(build.road);
+                    if build.player != catan.me {
+                        let _ = catan.players[build.player].inner.resources
+                            [TileKind::Brick as usize]
+                            .saturating_sub(1);
+                        let _ = catan.players[build.player].inner.resources
+                            [TileKind::Wood as usize]
+                            .saturating_sub(1);
+                    }
+                    spawn_catan_road(
+                        &mut commands,
+                        build.road,
+                        img_store.road_img[build.player].clone(),
+                    );
+                },
+                GameMsg::PlayerBuildSettlement(build) => {
+                    catan.inner.add_settlement(build.player, build.point);
+                    if build.player == catan.me {
+                        catan.players[build.player].inner.settlement_left -= 1;
+                    } else {
+                        let _ = catan.players[build.player].inner.resources
+                            [TileKind::Brick as usize]
+                            .saturating_sub(1);
+                        let _ = catan.players[build.player].inner.resources
+                            [TileKind::Grain as usize]
+                            .saturating_sub(1);
+                        let _ = catan.players[build.player].inner.resources
+                            [TileKind::Wood as usize]
+                            .saturating_sub(1);
+                        let _ = catan.players[build.player].inner.resources
+                            [TileKind::Wool as usize]
+                            .saturating_sub(1);
+                    }
+                },
+                GameMsg::PlayerBuildCity(build) => {
+                    assert_eq!(catan.current_turn, build.player);
+                    catan.inner.add_city(build.player, build.point);
+                    if build.player == catan.me {
+                        catan.players[build.player].inner.city_left -= 1;
+                        catan.players[build.player].inner.settlement_left += 1;
+                    } else {
+                        let _ = catan.players[build.player].inner.resources
+                            [TileKind::Grain as usize]
+                            .saturating_sub(2);
+                        let _ = catan.players[build.player].inner.resources
+                            [TileKind::Stone as usize]
+                            .saturating_sub(3);
+                    }
+                },
+                GameMsg::PlayerBuyDevelopmentCard(buy) => {
+                    assert_eq!(catan.current_turn, buy.player);
+                    if buy.player == catan.me {
+                        // ignore the broadcasted message
+                        if buy.card.is_some() {
+                            catan.players[buy.player].inner.resources
+                                [TileKind::Stone as usize] -= 1;
+                            catan.players[buy.player].inner.resources
+                                [TileKind::Grain as usize] -= 1;
+                            catan.players[buy.player].inner.resources
+                                [TileKind::Wool as usize] -= 1;
+                            catan.players[buy.player].inner.add_card(buy.card);
+                        }
+                    } else {
+                        catan.players[buy.player].inner.add_card(None);
+                        let _ = catan.players[buy.player].inner.resources
+                            [TileKind::Grain as usize]
+                            .saturating_sub(1);
+                        let _ = catan.players[buy.player].inner.resources
+                            [TileKind::Wool as usize]
+                            .saturating_sub(1);
+                        let _ = catan.players[buy.player].inner.resources
+                            [TileKind::Stone as usize]
+                            .saturating_sub(1);
+                    }
+                },
+                GameMsg::PlayerUseDevelopmentCard(use_card) => {
+                    assert_eq!(catan.current_turn, use_card.player);
+                    if use_card.player == catan.me {
+                        catan.players[use_card.player]
+                            .inner
+                            .remove_card(Some(use_card.card));
+                    } else {
+                        catan.players[use_card.player].inner.remove_card(None);
+                    }
 
-                match use_card.usage {
-                    DevelopmentCard::Monopoly(kind) => {
-                        for i in 0..catan.players.len() {
-                            if i != use_card.player {
-                                let count =
-                                    catan.players[i].inner.resources[kind as usize];
-                                catan.players[i].inner.resources[kind as usize] = 0;
-                                catan.players[use_card.player].inner.resources
-                                    [kind as usize] += count;
+                    match use_card.usage {
+                        DevelopmentCard::Monopoly(kind) => {
+                            for i in 0..catan.players.len() {
+                                if i != use_card.player {
+                                    let count =
+                                        catan.players[i].inner.resources[kind as usize];
+                                    catan.players[i].inner.resources[kind as usize] = 0;
+                                    catan.players[use_card.player].inner.resources
+                                        [kind as usize] += count;
+                                }
+                            }
+                        },
+                        DevelopmentCard::YearOfPlenty(kind1, kind2) => {
+                            catan.players[use_card.player].inner.resources
+                                [kind1 as usize] += 1;
+                            catan.players[use_card.player].inner.resources
+                                [kind2 as usize] += 1;
+                        },
+                        DevelopmentCard::VictoryPoint => {
+                            catan.players[use_card.player].inner.score += 1;
+                        },
+                        _ => {},
+                    }
+
+                    if let DevelopmentCard::Monopoly(_) = use_card.usage {}
+                },
+                GameMsg::PlayerSelectRobber(select_robber) => {
+                    assert_eq!(catan.current_turn, select_robber.player);
+                    catan.inner.set_robber(select_robber.coord);
+                },
+                GameMsg::PlayerTradeRequest((player, trade_req)) => {
+                    if player != catan.me {
+                        for offer in trade_req.from() {
+                            trade.resource.offer[offer.0 as usize] = offer.1 as u8;
+                        }
+                        for want in trade_req.to() {
+                            if catan.players[catan.me].inner.resources[want.0 as usize]
+                                < want.1 as usize
+                            {
+                                action_writer.send(
+                                    GameAct::TradeResponse(TradeResponse::Reject).into(),
+                                );
+                                next_trade_state.set(TradeState::WaitingConfirm);
+                                next_state.set(CatanState::Trade);
+                                trade.clear();
+                                return;
+                            }
+                            trade.resource.want[want.0 as usize] = want.1 as u8;
+                        }
+                        next_trade_state.set(TradeState::Accepting);
+                        next_state.set(CatanState::Trade);
+                        break;
+                    }
+                },
+                GameMsg::PlayerTradeResponse((player, resp)) => {
+                    info!("{:?}", trade_state);
+                    if trade_state.eq(&TradeState::WaitingResponse) && player != catan.me
+                    {
+                        trade.resource.response.insert(player, resp);
+                        if trade.resource.response.len() == catan.players.len() - 1 {
+                            if trade
+                                .resource
+                                .response
+                                .iter()
+                                .all(|(_, resp)| resp.eq(&TradeResponse::Accept))
+                            {
+                                next_trade_state.set(TradeState::Confirming);
+                            } else {
+                                action_writer.send(GameAct::TradeConfirm(None).into());
                             }
                         }
-                    },
-                    DevelopmentCard::YearOfPlenty(kind1, kind2) => {
-                        catan.players[use_card.player].inner.resources[kind1 as usize] +=
-                            1;
-                        catan.players[use_card.player].inner.resources[kind2 as usize] +=
-                            1;
-                    },
-                    DevelopmentCard::VictoryPoint => {
-                        catan.players[use_card.player].inner.score += 1;
-                    },
-                    _ => {},
-                }
-
-                if let DevelopmentCard::Monopoly(_) = use_card.usage {}
-            },
-            GameMsg::PlayerSelectRobber(select_robber) => {
-                assert_eq!(catan.current_turn, select_robber.player);
-                catan.inner.set_robber(select_robber.coord);
-            },
-            GameMsg::PlayerTradeRequest((player, trade_req)) => {
-                if player != catan.me {
-                    for offer in trade_req.from() {
-                        trade.resource.offer[offer.0 as usize] = offer.1 as u8;
                     }
-                    for want in trade_req.to() {
-                        if catan.players[catan.me].inner.resources[want.0 as usize]
-                            < want.1 as usize
-                        {
-                            action_writer.send(
-                                GameAct::TradeResponse(TradeResponse::Reject).into(),
-                            );
-                            next_trade_state.set(TradeState::WaitingConfirm);
-                            next_state.set(CatanState::Trade);
-                            trade.clear();
-                            return;
+                },
+                GameMsg::PlayerTrade(trade) => match trade {
+                    Some(trade) => {
+                        for (kind, count) in trade.request.from() {
+                            catan.players[trade.from].inner.resources[*kind as usize] -=
+                                count;
+                            if let Some(to) = trade.to {
+                                catan.players[to].inner.resources[*kind as usize] +=
+                                    count;
+                            }
                         }
-                        trade.resource.want[want.0 as usize] = want.1 as u8;
-                    }
-                    next_trade_state.set(TradeState::Accepting);
-                    next_state.set(CatanState::Trade);
-                    break;
-                }
-            },
-            GameMsg::PlayerTradeResponse((player, resp)) => {
-                info!("{:?}", trade_state);
-                if trade_state.eq(&TradeState::WaitingResponse) && player != catan.me {
-                    trade.resource.response.insert(player, resp);
-                    if trade.resource.response.len() == catan.players.len() - 1 {
-                        if trade
-                            .resource
-                            .response
-                            .iter()
-                            .all(|(_, resp)| resp.eq(&TradeResponse::Accept))
-                        {
-                            next_trade_state.set(TradeState::Confirming);
+                        for (kind, count) in trade.request.to() {
+                            catan.players[trade.from].inner.resources[*kind as usize] +=
+                                count;
+                            if let Some(to) = trade.to {
+                                catan.players[to].inner.resources[*kind as usize] -=
+                                    count;
+                            }
+                        }
+                        if catan.current_turn == catan.me {
+                            next_state.set(CatanState::Menu);
                         } else {
-                            action_writer.send(GameAct::TradeConfirm(None).into());
+                            next_state.set(CatanState::Wait);
                         }
-                    }
-                }
-            },
-            GameMsg::PlayerTrade(trade) => match trade {
-                Some(trade) => {
-                    for (kind, count) in trade.request.from() {
-                        catan.players[trade.from].inner.resources[*kind as usize] -=
-                            count;
-                        if let Some(to) = trade.to {
-                            catan.players[to].inner.resources[*kind as usize] += count;
+                        break;
+                    },
+                    None => {
+                        if catan.current_turn == catan.me {
+                            next_state.set(CatanState::Menu);
+                        } else {
+                            next_state.set(CatanState::Wait);
                         }
-                    }
-                    for (kind, count) in trade.request.to() {
-                        catan.players[trade.from].inner.resources[*kind as usize] +=
-                            count;
-                        if let Some(to) = trade.to {
-                            catan.players[to].inner.resources[*kind as usize] -= count;
-                        }
-                    }
-                    if catan.current_turn == catan.me {
-                        next_state.set(CatanState::Menu);
-                    } else {
-                        next_state.set(CatanState::Wait);
-                    }
-                    break;
+                        break;
+                    },
                 },
-                None => {
-                    if catan.current_turn == catan.me {
-                        next_state.set(CatanState::Menu);
-                    } else {
-                        next_state.set(CatanState::Wait);
-                    }
-                    break;
+                GameMsg::PlayerEndTurn(_) => {},
+                GameMsg::PlayerOfferResources(offer) => {
+                    catan.players[offer.player].inner.resources[offer.kind as usize] =
+                        (catan.players[offer.player].inner.resources[offer.kind as usize]
+                            as isize
+                            + offer.count)
+                            .min(20)
+                            .max(0) as usize;
                 },
-            },
-            GameMsg::PlayerEndTurn(_) => {},
-            GameMsg::PlayerOfferResources(offer) => {
-                catan.players[offer.player].inner.resources[offer.kind as usize] =
-                    (catan.players[offer.player].inner.resources[offer.kind as usize]
-                        as isize
-                        + offer.count)
-                        .min(20)
-                        .max(0) as usize;
-            },
-            GameMsg::PlayerStartSelectRobber() => {
-                if catan.current_turn == catan.me {
-                    next_state.set(CatanState::SelectRobber);
-                }
-            },
-            GameMsg::PlayerDropResources((player, count)) => {
-                if player == catan.me {
-                    catan.drop_cnt = count;
-                    next_state.set(CatanState::DropResource);
-                    break;
-                }
-            },
-            _ => {
-                unreachable!("unexpected event")
-            },
+                GameMsg::PlayerStartSelectRobber() => {
+                    if catan.current_turn == catan.me {
+                        next_state.set(CatanState::SelectRobber);
+                    }
+                },
+                GameMsg::PlayerDropResources((player, count)) => {
+                    if player == catan.me {
+                        catan.drop_cnt = count;
+                        next_state.set(CatanState::DropResource);
+                        break;
+                    }
+                },
+                _ => {
+                    unreachable!("unexpected event")
+                },
+            }
         }
     }
 }
@@ -3235,6 +3614,29 @@ fn client_process_event(
     }
 }
 
+fn update_operation_visibility(
+    mut operations: Query<&mut Visibility, With<Operation>>,
+    state: Res<State<CatanState>>,
+) {
+    match state.get() {
+        CatanState::Menu
+        | CatanState::BuidSettlement
+        | CatanState::BuildCity
+        | CatanState::BuildRoad
+        | CatanState::Trade
+        | CatanState::UseDevelopmentCard => {
+            for mut vis in operations.iter_mut() {
+                *vis = Visibility::Visible;
+            }
+        },
+        _ => {
+            for mut vis in operations.iter_mut() {
+                *vis = Visibility::Hidden;
+            }
+        },
+    }
+}
+
 pub fn catan_run() {
     App::new()
         .add_persistent_consumable_event::<GameEvent>()
@@ -3261,36 +3663,6 @@ pub fn catan_run() {
         .insert_resource(ImageStore::default())
         .insert_resource(TradeBoard::default())
         .insert_resource(DropBoard::default())
-        .insert_resource(OperationMenu([
-            OperationEntry {
-                operation: Operation::BuildSettlement,
-                ..default()
-            },
-            OperationEntry {
-                operation: Operation::BuildCity,
-                ..default()
-            },
-            OperationEntry {
-                operation: Operation::BuildRoad,
-                ..default()
-            },
-            OperationEntry {
-                operation: Operation::Trade,
-                ..default()
-            },
-            OperationEntry {
-                operation: Operation::BuyCard,
-                ..default()
-            },
-            OperationEntry {
-                operation: Operation::UseCard,
-                ..default()
-            },
-            OperationEntry {
-                operation: Operation::EndTurn,
-                ..default()
-            },
-        ]))
         .add_plugins((
             #[cfg(target_family = "wasm")]
             WebAssetPlugin::default(),
@@ -3316,14 +3688,51 @@ pub fn catan_run() {
             Update,
             intialize_game.run_if(in_state(CatanLoadState::Initialzing)),
         )
+        .add_systems(OnEnter(CatanState::InitRoad), spawn_initable_roads)
+        .add_systems(OnExit(CatanState::InitRoad), despawn_buildable_roads)
+        .add_systems(OnEnter(UseCardState::RoadBuilding), spawn_buildable_roads)
+        .add_systems(OnExit(UseCardState::RoadBuilding), despawn_buildable_roads)
+        .add_systems(OnEnter(CatanState::BuildRoad), spawn_buildable_roads)
+        .add_systems(OnExit(CatanState::BuildRoad), despawn_buildable_roads)
+        .add_systems(OnEnter(CatanState::Trade), spawn_trade)
+        .add_systems(OnExit(CatanState::Trade), despawn_trade)
+        .add_systems(
+            OnEnter(CatanState::UseDevelopmentCard),
+            spawn_use_development_card,
+        )
+        .add_systems(
+            OnExit(UseCardState::SelectCard),
+            despawn_use_development_card,
+        )
+        .add_systems(
+            OnExit(CatanState::UseDevelopmentCard),
+            despawn_use_development_card,
+        )
         .add_systems(
             Update,
             (
                 process_action,
+                process_event,
+                update_operation_visibility.run_if(in_state(CatanLoadState::Loaded)),
                 (
-                    process_event.run_if(in_state(CatanState::Menu)),
-                    process_event.run_if(in_state(CatanState::Wait)),
-                    process_event.run_if(in_state(CatanState::Trade)),
+                    (
+                        update_catan_resources_transform,
+                        update_catan_resources_spawn,
+                        update_catan_resources_cnt_spawn,
+                    )
+                        .chain(),
+                    (update_dices_transform, update_dices_spawn).chain(),
+                    (update_operation_transform, update_operation_spawn).chain(),
+                    (
+                        update_catan_tiles_transform,
+                        update_catan_tiles_spawn,
+                        update_catan_points_spawn,
+                        update_catan_harbor_spawn,
+                        update_catan_robber_spawn,
+                        update_catan_road_spawn,
+                        update_buildable_roads_spawn,
+                    )
+                        .chain(),
                 ),
                 check_init_settlement.run_if(in_state(CatanState::InitSettlement)),
                 check_init_road.run_if(in_state(CatanState::InitRoad)),
@@ -3332,13 +3741,10 @@ pub fn catan_run() {
                 check_build_city.run_if(in_state(CatanState::BuildCity)),
                 check_select_robber.run_if(in_state(CatanState::SelectRobber)),
                 check_steal_target.run_if(in_state(CatanState::Stealing)),
-                draw_board,
-                draw_player_board,
-                draw_resource,
                 (draw_drop_resource, check_drop_click)
                     .run_if(in_state(CatanState::DropResource)),
                 draw_steal_target.run_if(in_state(CatanState::Stealing)),
-                (draw_menu, check_menu_click)
+                check_menu_click
                     .run_if(not(in_state(CatanState::Wait)))
                     .run_if(not(in_state(CatanState::InitRoad)))
                     .run_if(not(in_state(CatanState::InitSettlement)))
@@ -3346,14 +3752,30 @@ pub fn catan_run() {
                     .run_if(not(in_state(CatanState::Stealing)))
                     .run_if(not(in_state(CatanState::DropResource))),
                 (
-                    draw_trade,
+                    (
+                        update_trade_spawn,
+                        update_resource_marker_spawn,
+                        update_resource_cnt_marker_spawn,
+                        update_resource_add_marker_spawn,
+                        update_resource_sub_marker_spawn,
+                        update_resource_trade_cnt_marker_spawn,
+                        update_trade_option_spawn,
+                        update_trade_target_player_spawn,
+                        update_trade_response_spawn,
+                    )
+                        .chain(),
                     check_trade_offering_click.run_if(in_state(TradeState::Offering)),
                     check_trade_accepting_click.run_if(in_state(TradeState::Accepting)),
                     check_trade_confirm_click.run_if(in_state(TradeState::Confirming)),
                 )
                     .run_if(in_state(CatanState::Trade)),
                 (
-                    (draw_development_card, check_development_card_click)
+                    (
+                        update_use_development_card,
+                        update_development_card,
+                        update_development_card_cnt,
+                        check_development_card_click,
+                    )
                         .run_if(in_state(UseCardState::SelectCard)),
                     (draw_monopoly, check_monopoly_click)
                         .run_if(in_state(UseCardState::Monopoly)),
@@ -3366,8 +3788,6 @@ pub fn catan_run() {
                         .run_if(in_state(UseCardState::RoadBuilding)),
                 )
                     .run_if(in_state(CatanState::UseDevelopmentCard)),
-                update_player_text,
-                change_state,
             )
                 .run_if(in_state(CatanLoadState::Loaded)),
         )

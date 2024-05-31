@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use super::catan::element::{GameAct, GameMsg};
 #[cfg(not(target_family = "wasm"))]
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 #[cfg(target_family = "wasm")]
-use web_time::{Duration, Instant, SystemTime};
+use web_time::{Duration, SystemTime};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum ServerMsg {
@@ -52,7 +52,7 @@ pub fn new_server() -> NetworkServer {
 #[cfg(feature = "client")]
 pub fn new_client() -> NetworkClient {
     bevy_simplenet::ClientFactory::<NetworkChannel>::new("network").new_client(
-        enfync::builtin::Handle::default(), //automatically selects native/WASM runtime
+        enfync::builtin::Handle::default(),
         url::Url::parse("ws://boardgame.studio:9001/ws").unwrap(),
         bevy_simplenet::AuthRequest::None {
             client_id: SystemTime::now()

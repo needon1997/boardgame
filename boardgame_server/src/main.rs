@@ -53,15 +53,15 @@ async fn main() {
         loop {
             let player1 = player_rx.recv().await.unwrap();
             println!("Player 1 received");
-            let player2 = player_rx.recv().await.unwrap();
-            println!("Player 2 received");
-            // tokio::task::spawn(async move {
-            //     CatanGame::run(vec![player1], CatanDataSetup::Basic).await;
-            // });
-
+            // let player2 = player_rx.recv().await.unwrap();
+            // println!("Player 2 received");
             tokio::task::spawn(async move {
-                CatanGame::run(vec![player1, player2], CatanDataSetup::Basic).await;
+                CatanGame::run(vec![player1], CatanDataSetup::Basic).await;
             });
+
+            // tokio::task::spawn(async move {
+            //     CatanGame::run(vec![player1, player2], CatanDataSetup::Basic).await;
+            // });
         }
     });
 
@@ -100,7 +100,7 @@ async fn main() {
                                                             .send((client_id, msg))
                                                             .unwrap();
                                                     },
-                                                    _ => {},
+                                                    _ => {break;},
                                                 };
                                             }
                                         });
