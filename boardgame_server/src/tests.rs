@@ -205,7 +205,7 @@ mod tests {
             .unwrap();
         pop_msg_and_assert(&mut game, GameMsg::PlayerBuildSettlement(build.clone()));
         assert_eq!(game.players[0].base.score, 3);
-        assert_eq!(game.players[0].base.get_longest_road(), 2);
+        assert_eq!(game.players[0].base.get_longest_path(), 2);
         assert_eq!(game.players[1].base.score, 2);
 
         let build = BuyDevelopmentCard {
@@ -287,7 +287,7 @@ mod tests {
         pop_msg_and_assert(&mut game, GameMsg::PlayerBuildCity(build.clone()));
 
         assert_eq!(game.players[0].base.score, 6);
-        assert_eq!(game.players[0].base.get_longest_road(), 2);
+        assert_eq!(game.players[0].base.get_longest_path(), 2);
         assert_eq!(game.players[1].base.score, 2);
 
         game.players[0].base.resources[TileKind::Brick as usize] += 1;
@@ -316,7 +316,7 @@ mod tests {
         pop_msg_and_assert(&mut game, GameMsg::PlayerBuildRoad(build.clone()));
 
         assert_eq!(game.players[0].base.score, 6);
-        assert_eq!(game.players[0].base.get_longest_road(), 3);
+        assert_eq!(game.players[0].base.get_longest_path(), 3);
         assert_eq!(game.players[1].base.score, 2);
 
         game.players[0].base.resources[TileKind::Brick as usize] += 1;
@@ -332,7 +332,7 @@ mod tests {
         pop_msg_and_assert(&mut game, GameMsg::PlayerBuildRoad(build.clone()));
 
         assert_eq!(game.players[0].base.score, 6);
-        assert_eq!(game.players[0].base.get_longest_road(), 4);
+        assert_eq!(game.players[0].base.get_longest_path(), 4);
         assert_eq!(game.players[1].base.score, 2);
 
         game.players[0].base.resources[TileKind::Brick as usize] += 1;
@@ -367,7 +367,7 @@ mod tests {
         game.update(GameUpdate::BuildRoad(build.clone())).unwrap();
         pop_msg_and_assert(&mut game, GameMsg::PlayerBuildRoad(build.clone()));
         assert_eq!(game.players[0].base.score, 6);
-        assert_eq!(game.players[0].base.get_longest_road(), 5);
+        assert_eq!(game.players[0].base.get_longest_path(), 5);
         assert_eq!(game.players[1].base.score, 2);
 
         game.players[0].base.resources[TileKind::Brick as usize] += 1;
@@ -382,7 +382,7 @@ mod tests {
         game.update(GameUpdate::BuildRoad(build.clone())).unwrap();
         pop_msg_and_assert(&mut game, GameMsg::PlayerBuildRoad(build.clone()));
         assert_eq!(game.players[0].base.score, 6);
-        assert_eq!(game.players[0].base.get_longest_road(), 7);
+        assert_eq!(game.players[0].base.get_longest_path(), 7);
         assert_eq!(game.players[1].base.score, 2);
 
         game.players[0].base.resources[TileKind::Brick as usize] += 1;
@@ -397,7 +397,7 @@ mod tests {
         game.update(GameUpdate::BuildRoad(build.clone())).unwrap();
         pop_msg_and_assert(&mut game, GameMsg::PlayerBuildRoad(build.clone()));
         assert_eq!(game.players[0].base.score, 6);
-        assert_eq!(game.players[0].base.get_longest_road(), 7);
+        assert_eq!(game.players[0].base.get_longest_path(), 7);
         assert_eq!(game.players[1].base.score, 2);
 
         game.players[0].base.resources[TileKind::Brick as usize] += 1;
@@ -412,9 +412,9 @@ mod tests {
         game.update(GameUpdate::BuildRoad(build.clone()))
             .expect_err("invalid position");
 
-        game.check_longest_road();
+        game.check_longest_path();
         assert_eq!(game.players[0].base.score, 8);
-        assert_eq!(game.players[0].base.get_longest_road(), 7);
+        assert_eq!(game.players[0].base.get_longest_path(), 7);
         assert_eq!(game.players[1].base.score, 2);
     }
 

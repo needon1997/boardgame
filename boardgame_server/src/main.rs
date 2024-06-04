@@ -36,6 +36,7 @@ impl GamePlayer for NetWorkPlayer {
     async fn send_message(&mut self, message: GamePlayerMessage) {
         match message {
             GamePlayerMessage::Catan(message) => {
+                println!("Sending message:{:?}", message);
                 self.tx.send(ServerMsg::Catan(message)).unwrap();
             },
             GamePlayerMessage::PlaceHolder => {},

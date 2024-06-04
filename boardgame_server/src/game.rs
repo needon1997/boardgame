@@ -12,6 +12,7 @@ pub(super) enum GameUpdate {
     HitDice(usize),
     OfferResources(OfferResources),
     BuildRoad(BuildRoad),
+    BuildBoat(BuildRoad),
     BuildSettlement(BuildSettlement),
     BuildCity(BuildCity),
     BuyDevelopmentCard(BuyDevelopmentCard),
@@ -83,6 +84,7 @@ where
                 data.tiles,
                 data.points,
                 HashMap::new(),
+                HashMap::new(),
                 data.harbors,
                 data.dics_map,
                 data.robber,
@@ -110,14 +112,28 @@ where
             build.road
         );
 
-        if !self.inner.point_valid(build.road.start)
-            || !self.inner.point_valid(build.road.end)
+        if !self.inner.point_valid_settlement(build.road.start)
+            || !self.inner.point_valid_settlement(build.road.end)
         {
             return Err("Invalid road position".to_owned());
         }
 
         if self.players[build.player].base.roads.len() >= 15 {
             return Err("Road limit reached".to_owned());
+        }
+
+        if self.is_initialized
+            && !self.players[build.player]
+                .base
+                .have_roads_to(build.road.start)
+            && !self.players[build.player]
+                .base
+                .have_roads_to(build.road.end)
+            && self.inner.point(build.road.start).owner() != Some(build.player)
+            && self.inner.point(build.road.end).owner() != Some(build.player)
+            && !self.inner.check_valid_buildable_road(build.road)
+        {
+            return Err(format!("Player have no road to {:?}", build.road));
         }
 
         if self.is_initialized {
@@ -129,17 +145,6 @@ where
                 self.players[build.player].base.resources[TileKind::Brick as usize] -= 1;
                 self.players[build.player].base.resources[TileKind::Wood as usize] -= 1;
             }
-        }
-
-        if self.is_initialized
-            && !self.players[build.player]
-                .base
-                .have_roads_to(build.road.start)
-            && !self.players[build.player]
-                .base
-                .have_roads_to(build.road.end)
-        {
-            return Err(format!("Player have no road to {:?}", build.road));
         }
 
         match {
@@ -156,6 +161,62 @@ where
         }
     }
 
+    fn build_boat(&mut self, build: BuildRoad) -> Result<(), String> {
+        println!(
+            "{} built a boat from {:?}",
+            self.players[build.player].name(),
+            build.road
+        );
+
+        if !self.inner.point_valid(build.road.start)
+            || !self.inner.point_valid(build.road.end)
+        {
+            return Err("Invalid boat position".to_owned());
+        }
+
+        if self.players[build.player].base.boats.len() >= 15 {
+            return Err("Boat limit reached".to_owned());
+        }
+
+        if self.is_initialized {
+            if self.players[build.player].base.resources[TileKind::Wool as usize] < 1
+                || self.players[build.player].base.resources[TileKind::Wood as usize] < 1
+            {
+                return Err("Not enough resources".to_owned());
+            } else {
+                self.players[build.player].base.resources[TileKind::Wool as usize] -= 1;
+                self.players[build.player].base.resources[TileKind::Wood as usize] -= 1;
+            }
+        }
+
+        if self.is_initialized
+            && !self.players[build.player]
+                .base
+                .have_boats_to(build.road.start)
+            && !self.players[build.player]
+                .base
+                .have_boats_to(build.road.end)
+            && self.inner.point(build.road.start).owner() != Some(build.player)
+            && self.inner.point(build.road.end).owner() != Some(build.player)
+            && !self.inner.check_valid_buildable_boat(build.road)
+        {
+            return Err(format!("Player cannot build boat to {:?}", build.road));
+        }
+
+        match {
+            self.players[build.player].base.add_boat(build.road);
+            self.inner.add_boat(build.player, build.road)
+        } {
+            Some(_) => {
+                return Err("Boat already exists".to_owned());
+            },
+            None => {
+                self.broadcast.push(GameMsg::PlayerBuildBoat(build));
+                return Ok(());
+            },
+        }
+    }
+
     fn build_settlement(&mut self, build: BuildSettlement) -> Result<(), String> {
         println!(
             "{} built a settlement at {:?}",
@@ -163,7 +224,7 @@ where
             build.point
         );
 
-        if !self.inner.point_valid(build.point) {
+        if !self.inner.point_valid_settlement(build.point) {
             return Err("Invalid settlement position".to_owned());
         }
 
@@ -195,6 +256,7 @@ where
 
                 if self.is_initialized
                     && !self.players[build.player].base.have_roads_to(build.point)
+                    && !self.players[build.player].base.have_boats_to(build.point)
                 {
                     return Err(format!("Player have no road to {:?}", build.point));
                 }
@@ -241,7 +303,7 @@ where
             build.point
         );
 
-        if !self.inner.point_valid(build.point) {
+        if !self.inner.point_valid_settlement(build.point) {
             return Err("Invalid city position".to_owned());
         }
 
@@ -411,8 +473,8 @@ where
         None
     }
 
-    pub fn check_longest_road(&mut self) {
-        let longest_road = self.players[self.current_player].base.get_longest_road();
+    pub fn check_longest_path(&mut self) {
+        let longest_road = self.players[self.current_player].base.get_longest_path();
         if longest_road >= 5 {
             if let Some((player, length)) = self.longest_road {
                 if length < longest_road {
@@ -448,7 +510,7 @@ where
             println!("Match Tile: {:?}", match_tile);
             let tile = &mut self.inner.tile(*match_tile);
             let kind = tile.kind();
-            if !tile.is_empty() && *match_tile != self.inner.robber() {
+            if tile.kind().is_resource() && *match_tile != self.inner.robber() {
                 let points = self.inner.tile_get_points(*match_tile);
                 for point in points {
                     let point = &self.inner.point(point);
@@ -600,6 +662,10 @@ where
             GameUpdate::BuildRoad(build) => {
                 self.build_road(build)?;
             },
+            GameUpdate::BuildBoat(build) => {
+                self.build_boat(build)?;
+            },
+
             GameUpdate::BuildSettlement(build) => {
                 self.build_settlement(build)?;
             },
@@ -683,6 +749,59 @@ where
                 },
             }
         } else {
+            for match_tile in self
+                .inner
+                .dice_map()
+                .get(&((dice1 + dice2) as usize))
+                .unwrap()
+                .clone()
+                .iter()
+            {
+                println!("Match Tile: {:?}", match_tile);
+                let tile = &mut self.inner.tile(*match_tile);
+                if tile.kind() == TileKind::Gold && *match_tile != self.inner.robber() {
+                    let points = self.inner.tile_get_points(*match_tile);
+                    for point in points {
+                        let point = &self.inner.point(point);
+                        match point.owner {
+                            Some(player) => {
+                                let count = if point.city { 2 } else { 1 };
+                                self.broadcast
+                                    .push(GameMsg::PlayerPickResources((player, count)));
+
+                                self.flush_messages().await;
+
+                                match self.players[player].get_action().await {
+                                    GameAct::PickResource(pick) => {
+                                        if pick.iter().fold(0, |sum, (_, cnt)| sum + cnt)
+                                            != count
+                                        {
+                                            panic!("Invalid pick count");
+                                        }
+
+                                        for (kind, count) in pick {
+                                            self.update(GameUpdate::OfferResources(
+                                                OfferResources {
+                                                    player,
+                                                    count: (count as isize),
+                                                    kind,
+                                                },
+                                            ))
+                                            .unwrap();
+                                        }
+                                    },
+                                    _ => {
+                                        panic!("Invalid action")
+                                    },
+                                };
+                                self.flush_messages().await;
+                            },
+                            None => {},
+                        }
+                    }
+                }
+            }
+
             self.update(GameUpdate::HitDice((dice1 + dice2) as usize))
                 .unwrap();
         }
@@ -710,13 +829,14 @@ where
         loop {
             let action = self.players[self.current_player].get_action().await;
             match action {
-                GameAct::BuildRoad(from, to) => {
-                    let road = if from.x == to.x {
-                        Line::new(from, to)
-                    } else {
-                        Line::new(to, from)
-                    };
+                GameAct::BuildRoad(road) => {
                     self.update(GameUpdate::BuildRoad(BuildRoad {
+                        player: self.current_player,
+                        road,
+                    }));
+                },
+                GameAct::BuildBoat(road) => {
+                    self.update(GameUpdate::BuildBoat(BuildRoad {
                         player: self.current_player,
                         road,
                     }));
@@ -874,7 +994,7 @@ where
             self.players[i].send_message(msg).await;
         }
 
-        for i in (0..self.players.len()) {
+        for i in 0..self.players.len() {
             self.broadcast(GameMsg::PlayerInit(i)).await;
             let action = self.players[i].get_action().await;
             match action {
@@ -891,13 +1011,14 @@ where
             self.flush_messages().await;
             let action = self.players[i].get_action().await;
             match action {
-                GameAct::BuildRoad(from, to) => {
-                    let road = if from.x == to.x {
-                        Line::new(from, to)
-                    } else {
-                        Line::new(to, from)
-                    };
+                GameAct::BuildRoad(road) => {
                     self.update(GameUpdate::BuildRoad(BuildRoad { player: i, road }));
+                },
+                GameAct::BuildBoat(boat) => {
+                    self.update(GameUpdate::BuildBoat(BuildRoad {
+                        player: i,
+                        road: boat,
+                    }));
                 },
                 _ => {
                     panic!("Invalid action")
@@ -935,13 +1056,14 @@ where
             self.flush_messages().await;
             let action = self.players[i].get_action().await;
             match action {
-                GameAct::BuildRoad(from, to) => {
-                    let road = if from.x == to.x {
-                        Line::new(from, to)
-                    } else {
-                        Line::new(to, from)
-                    };
+                GameAct::BuildRoad(road) => {
                     self.update(GameUpdate::BuildRoad(BuildRoad { player: i, road }));
+                },
+                GameAct::BuildBoat(boat) => {
+                    self.update(GameUpdate::BuildBoat(BuildRoad {
+                        player: i,
+                        road: boat,
+                    }));
                 },
                 _ => {
                     panic!("Invalid action")
@@ -959,7 +1081,7 @@ where
                 .await;
             self.roll_dice().await;
             self.player_action().await;
-            self.check_longest_road();
+            self.check_longest_path();
             if let Some(player) = self.check_winner() {
                 println!("{} won", self.players[player].name());
                 break;

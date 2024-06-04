@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    hash::Hash,
     sync::Arc,
 };
 
@@ -39,6 +40,8 @@ pub enum TileKind {
     #[default]
     Empty,
     Dessert,
+    Ocean,
+    Gold,
     Wood,
     Brick,
     Grain,
@@ -54,11 +57,13 @@ impl TryFrom<u8> for TileKind {
         match value {
             0 => Ok(TileKind::Empty),
             1 => Ok(TileKind::Dessert),
-            2 => Ok(TileKind::Wood),
-            3 => Ok(TileKind::Brick),
-            4 => Ok(TileKind::Grain),
-            5 => Ok(TileKind::Wool),
-            6 => Ok(TileKind::Stone),
+            2 => Ok(TileKind::Ocean),
+            3 => Ok(TileKind::Gold),
+            4 => Ok(TileKind::Wood),
+            5 => Ok(TileKind::Brick),
+            6 => Ok(TileKind::Grain),
+            7 => Ok(TileKind::Wool),
+            8 => Ok(TileKind::Stone),
             _ => Err(()),
         }
     }
@@ -72,6 +77,10 @@ impl TileKind {
             || *self == TileKind::Wool
             || *self == TileKind::Stone
     }
+
+    pub fn is_resource_or_gold(&self) -> bool {
+        self.is_resource() || *self == TileKind::Gold
+    }
 }
 
 #[derive(Default, Copy, Clone, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
@@ -83,6 +92,10 @@ pub struct Tile {
 impl Tile {
     pub fn is_empty(&self) -> bool {
         self.kind == TileKind::Empty
+    }
+
+    pub fn is_ocean(&self) -> bool {
+        self.kind == TileKind::Ocean
     }
 
     pub fn set_number(&mut self, number: usize) {
@@ -134,6 +147,7 @@ pub struct CatanCommon {
     tiles: Vec<Vec<Tile>>,
     points: Vec<Vec<Point>>,
     roads: HashMap<Line, usize>,
+    boats: HashMap<Line, usize>,
     harbors: Vec<(Line, TileKind)>,
     robber: Coordinate,
     dice_map: HashMap<usize, Vec<Coordinate>>,
@@ -142,13 +156,14 @@ pub struct CatanCommon {
 impl CatanCommon {
     pub fn new(
         tiles: Vec<Vec<Tile>>, points: Vec<Vec<Point>>, roads: HashMap<Line, usize>,
-        harbors: Vec<(Line, TileKind)>, dice_map: HashMap<usize, Vec<Coordinate>>,
-        robber: Coordinate,
+        boats: HashMap<Line, usize>, harbors: Vec<(Line, TileKind)>,
+        dice_map: HashMap<usize, Vec<Coordinate>>, robber: Coordinate,
     ) -> Self {
         Self {
             tiles,
             points,
             roads,
+            boats,
             harbors,
             robber,
             dice_map,
@@ -175,6 +190,10 @@ impl CatanCommon {
         &self.roads
     }
 
+    pub fn boats(&self) -> &HashMap<Line, usize> {
+        &self.boats
+    }
+
     pub fn set_robber(&mut self, coord: Coordinate) {
         self.robber = coord;
     }
@@ -189,6 +208,10 @@ impl CatanCommon {
 
     pub fn add_road(&mut self, player: usize, road: Line) -> Option<usize> {
         self.roads.insert(road, player)
+    }
+
+    pub fn add_boat(&mut self, player: usize, boat: Line) -> Option<usize> {
+        self.boats.insert(boat, player)
     }
 
     pub fn add_settlement(&mut self, player: usize, point: Coordinate) {
@@ -297,14 +320,25 @@ impl CatanCommon {
     }
 
     pub fn point_valid(&self, point: Coordinate) -> bool {
-        for p in self.ponint_get_tile(point) {
+        return self.ponint_get_tile(point).iter().any(|&p| {
             if let Some(p) = p {
                 if !self.tile(p).is_empty() {
                     return true;
                 }
             }
-        }
-        return false;
+            return false;
+        });
+    }
+
+    pub fn point_valid_settlement(&self, point: Coordinate) -> bool {
+        return self.ponint_get_tile(point).iter().any(|&p| {
+            if let Some(p) = p {
+                if !self.tile(p).is_empty() && !self.tile(p).is_ocean() {
+                    return true;
+                }
+            }
+            return false;
+        });
     }
 
     pub fn ponint_get_tile(&self, coord: Coordinate) -> [Option<Coordinate>; 3] {
@@ -481,6 +515,51 @@ impl CatanCommon {
         }
         Ok(())
     }
+
+    pub fn check_valid_buildable_boat(&self, boat: Line) -> bool {
+        let start_tile = self.ponint_get_tile(boat.start);
+        let end_tile = self.ponint_get_tile(boat.end);
+
+        start_tile.iter().any(|&tile| {
+            end_tile.iter().any(|&start_tile| {
+                if let Some(tile) = tile {
+                    if let Some(start_tile) = start_tile {
+                        if start_tile == tile && self.tile(tile).kind() == TileKind::Ocean
+                        {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            })
+        }) && self.roads().get(&boat).is_none()
+            && self.boats().get(&boat).is_none()
+            && self.point_valid(boat.start)
+            && self.point_valid(boat.end)
+    }
+
+    pub fn check_valid_buildable_road(&self, road: Line) -> bool {
+        let start_tile = self.ponint_get_tile(road.start);
+        let end_tile = self.ponint_get_tile(road.end);
+
+        start_tile.iter().any(|&tile| {
+            end_tile.iter().any(|&start_tile| {
+                if let Some(tile) = tile {
+                    if let Some(start_tile) = start_tile {
+                        if start_tile == tile
+                            && self.tile(tile).kind().is_resource_or_gold()
+                        {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            })
+        }) && self.roads().get(&road).is_none()
+            && self.boats().get(&road).is_none()
+            && self.point_valid_settlement(road.start)
+            && self.point_valid_settlement(road.end)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -489,6 +568,7 @@ pub struct PlayerCommon {
     pub resources: [usize; TileKind::Max as usize],
     pub cards: [usize; DevCard::Max as usize],
     pub roads: Vec<Line>,
+    pub boats: Vec<Line>,
     pub settlement_left: usize,
     pub city_left: usize,
 }
@@ -500,6 +580,7 @@ impl Default for PlayerCommon {
             resources: Default::default(),
             cards: Default::default(),
             roads: Vec::new(),
+            boats: Vec::new(),
             settlement_left: 5,
             city_left: 4,
         }
@@ -507,22 +588,24 @@ impl Default for PlayerCommon {
 }
 
 impl PlayerCommon {
-    pub fn longest_road(
+    pub fn longest_path(
         &self, visited: &mut Vec<bool>, current: Option<Coordinate>,
     ) -> usize {
         let mut longest = 0;
-        for i in 0..self.roads.len() {
+        let mut path = self.roads.clone();
+        path.append(&mut self.boats.clone());
+        for i in 0..path.len() {
             if visited[i] {
                 continue;
             }
             visited[i] = true;
             let length = 1 + if current.is_none() {
-                self.longest_road(visited, Some(self.roads[i].start))
-                    .max(self.longest_road(visited, Some(self.roads[i].end)))
-            } else if self.roads[i].end == current.unwrap() {
-                self.longest_road(visited, Some(self.roads[i].start))
-            } else if self.roads[i].start == current.unwrap() {
-                self.longest_road(visited, Some(self.roads[i].end))
+                self.longest_path(visited, Some(path[i].start))
+                    .max(self.longest_path(visited, Some(path[i].end)))
+            } else if path[i].end == current.unwrap() {
+                self.longest_path(visited, Some(path[i].start))
+            } else if path[i].start == current.unwrap() {
+                self.longest_path(visited, Some(path[i].end))
             } else {
                 visited[i] = false;
                 continue;
@@ -536,19 +619,29 @@ impl PlayerCommon {
         longest
     }
 
-    pub fn get_longest_road(&self) -> usize {
-        let mut visited = vec![false; self.roads.len()];
-        self.longest_road(&mut visited, None)
+    pub fn get_longest_path(&self) -> usize {
+        let mut visited = vec![false; self.roads.len() + self.boats.len()];
+        self.longest_path(&mut visited, None)
     }
 
     pub fn have_roads_to(&self, to: Coordinate) -> bool {
         self.roads.iter().any(|r| r.start == to || r.end == to)
     }
 
+    pub fn have_boats_to(&self, to: Coordinate) -> bool {
+        self.boats.iter().any(|r| r.start == to || r.end == to)
+    }
+
     pub fn can_build_road(&self) -> bool {
         self.resources[TileKind::Brick as usize] >= 1
             && self.resources[TileKind::Wood as usize] >= 1
             && self.roads.len() < 15
+    }
+
+    pub fn can_build_boat(&self) -> bool {
+        self.resources[TileKind::Wool as usize] >= 1
+            && self.resources[TileKind::Wood as usize] >= 1
+            && self.boats.len() < 15
     }
 
     pub fn can_build_settlement(&self) -> bool {
@@ -603,6 +696,10 @@ impl PlayerCommon {
 
     pub fn add_road(&mut self, road: Line) {
         self.roads.push(road);
+    }
+
+    pub fn add_boat(&mut self, boat: Line) {
+        self.boats.push(boat);
     }
 }
 
@@ -736,7 +833,8 @@ pub struct OfferResources {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GameAct {
-    BuildRoad(Coordinate, Coordinate),
+    BuildRoad(Line),
+    BuildBoat(Line),
     BuildSettlement(Coordinate),
     BuildCity(Coordinate),
     BuyDevelopmentCard,
@@ -748,6 +846,7 @@ pub enum GameAct {
     TradeConfirm(Option<usize>),
     SelectRobber((Option<usize>, Coordinate)),
     DropResource(Vec<(TileKind, usize)>),
+    PickResource(Vec<(TileKind, usize)>),
     StealResource(usize),
     EndTurn,
 }
@@ -769,6 +868,7 @@ pub enum GameMsg {
     PlayerTurn(usize),
     PlayerRollDice((u8, u8)),
     PlayerBuildRoad(BuildRoad),
+    PlayerBuildBoat(BuildRoad),
     PlayerBuildSettlement(BuildSettlement),
     PlayerBuildCity(BuildCity),
     PlayerBuyDevelopmentCard(BuyDevelopmentCard),
@@ -780,5 +880,6 @@ pub enum GameMsg {
     PlayerTrade(Option<Trade>),
     PlayerOfferResources(OfferResources),
     PlayerDropResources((usize, usize)),
+    PlayerPickResources((usize, usize)),
     PlayerEndTurn(usize),
 }

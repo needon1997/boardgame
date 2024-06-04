@@ -11,7 +11,6 @@ bevy = { version = "0.13.0" }
 bevy_consumable_event = "0.3.0"
 bevy_framepace = { git = "https://github.com/needon1997/bevy_framepace.git" }
 bevy_simplenet = { git = "https://github.com/needon1997/bevy_simplenet.git", default_features = false, features = ["client"] }
-bevy_vector_shapes = "0.7.0"
 bevy_web_asset = "0.8.0"
 log = "0.4"
 rand = "0.8.4"

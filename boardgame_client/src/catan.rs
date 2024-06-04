@@ -1,21 +1,13 @@
 use bevy::asset::{AssetMetaCheck, LoadState};
-use bevy::ecs::world;
 use bevy::prelude::*;
-use bevy::render::view::visibility;
-use bevy::ui::update;
 use bevy::window::WindowResolution;
 use bevy::DefaultPlugins;
 use bevy_consumable_event::{
     ConsumableEventApp, ConsumableEventReader, ConsumableEventWriter,
 };
-use bevy_vector_shapes::prelude::*;
 #[cfg(target_family = "wasm")]
 use bevy_web_asset::WebAssetPlugin;
-use std::{
-    collections::{HashMap, HashSet},
-    f32::consts::PI,
-    ops::Deref,
-};
+use std::{collections::HashMap, f32::consts::PI, ops::Deref};
 
 use boardgame_common::{
     catan::element::{
@@ -41,11 +33,15 @@ enum CatanState {
     BuidSettlement,
     BuildCity,
     BuildRoad,
+    BuildBoat,
     Trade,
     UseDevelopmentCard,
     SelectRobber,
     Stealing,
     DropResource,
+    PickResource,
+    BoatRoadBuild,
+    BoatRoadInit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -57,7 +53,6 @@ struct CatanPlayerDraw {
 #[derive(Debug, Default)]
 struct CatanPlayer {
     inner: PlayerCommon,
-    draw: CatanPlayerDraw,
 }
 
 #[derive(Debug)]
@@ -85,11 +80,12 @@ struct Catan {
     radius: f32,
     me: usize,
     current_turn: usize,
-    stealing_candidate: HashSet<usize>,
+    stealing_candidate: Vec<usize>,
     selected_yop: Option<TileKind>,
-    road_building: Option<Line>,
+    path_building: Option<Line>,
     used_card: bool,
     drop_cnt: usize,
+    pick_cnt: usize,
 }
 
 impl Catan {
@@ -121,6 +117,7 @@ impl Catan {
             start.tile,
             logic_points,
             HashMap::new(),
+            HashMap::new(),
             start.harbor,
             start.dice_map,
             start.robber,
@@ -139,16 +136,16 @@ impl Catan {
                 .iter()
                 .map(|player_common| CatanPlayer {
                     inner: player_common.clone(),
-                    draw: CatanPlayerDraw::default(),
                 })
                 .collect(),
             me: start.you,
             current_turn: 0,
             drop_cnt: 0,
-            stealing_candidate: HashSet::new(),
+            stealing_candidate: Vec::new(),
             selected_yop: None,
-            road_building: None,
+            path_building: None,
             used_card: false,
+            pick_cnt: 0,
         }
     }
 }
@@ -172,7 +169,7 @@ fn check_build_city(
                     {
                         let coordinate = Coordinate { x: i, y: j };
                         let me = catan.me;
-                        if catan.inner.point_valid(coordinate)
+                        if catan.inner.point_valid_settlement(coordinate)
                             && catan.inner.point(coordinate).owner().is_some()
                             && catan.inner.point(coordinate).owner().unwrap() == me
                         {
@@ -210,10 +207,13 @@ fn check_build_settlement(
                     {
                         let coordinate = Coordinate { x: i, y: j };
                         let me = catan.me;
-                        if catan.inner.point_valid(coordinate)
+                        if catan.inner.point_valid_settlement(coordinate)
                             && catan.inner.point(coordinate).owner().is_none()
                             && catan.players[me].inner.can_build_settlement()
-                            && catan.players[me].inner.have_roads_to(coordinate)
+                            && (catan.players[me].inner.have_roads_to(coordinate)
+                                || catan.players[catan.me]
+                                    .inner
+                                    .have_boats_to(coordinate))
                             && !catan.inner.point_get_points(coordinate).iter().any(
                                 |&p| {
                                     if let Some(p) = p {
@@ -263,7 +263,7 @@ fn check_init_settlement(
                     {
                         let coordinate = Coordinate { x: i, y: j };
                         let me = catan.me;
-                        if catan.inner.point_valid(coordinate)
+                        if catan.inner.point_valid_settlement(coordinate)
                             && catan.inner.point(coordinate).owner().is_none()
                             && !catan.inner.point_get_points(coordinate).iter().any(
                                 |&p| {
@@ -287,9 +287,9 @@ fn check_init_settlement(
     }
 }
 
-fn check_init_road(
+fn check_init_path(
     windows: Query<&Window>, mouse_button_input: Res<ButtonInput<MouseButton>>,
-    roads: Query<(Entity, &BuildableCatanRoad)>, mut catan: ResMut<Catan>,
+    roads: Query<(Entity, &BuildableCatanPath)>, mut catan: ResMut<Catan>,
     mut next_state: ResMut<NextState<CatanState>>,
     mut action_writer: ConsumableEventWriter<GameAction>,
 ) {
@@ -308,12 +308,16 @@ fn check_init_road(
                     && y > point.y - catan.radius * 0.25
                     && y < point.y + catan.radius * 0.25
                 {
-                    action_writer
-                        .send(GameAct::BuildRoad(road.line.start, road.line.end).into());
-                    let me = catan.me;
-                    catan.inner.add_road(me, road.line);
-                    catan.players[me].inner.add_road(road.line);
-                    next_state.set(CatanState::Wait);
+                    if road.boat && road.road {
+                        catan.path_building = Some(road.line);
+                        next_state.set(CatanState::BoatRoadInit)
+                    } else if road.boat {
+                        action_writer.send(GameAct::BuildBoat(road.line).into());
+                        next_state.set(CatanState::Wait);
+                    } else if road.road {
+                        action_writer.send(GameAct::BuildRoad(road.line).into());
+                        next_state.set(CatanState::Wait);
+                    }
                     break;
                 }
             }
@@ -321,9 +325,10 @@ fn check_init_road(
     }
 }
 
-fn check_build_road(
+fn check_build_path(
     windows: Query<&Window>, mouse_button_input: Res<ButtonInput<MouseButton>>,
-    mut catan: ResMut<Catan>, mut next_state: ResMut<NextState<CatanState>>,
+    paths: Query<(Entity, &BuildableCatanPath)>, mut catan: ResMut<Catan>,
+    mut next_state: ResMut<NextState<CatanState>>,
     mut action_writer: ConsumableEventWriter<GameAction>,
 ) {
     if mouse_button_input.just_pressed(MouseButton::Left) {
@@ -331,56 +336,32 @@ fn check_build_road(
         if let Some(mouse) = windows.iter().next().unwrap().cursor_position() {
             let x = mouse.x - windows.iter().next().unwrap().width() / 2.;
             let y = -(mouse.y - windows.iter().next().unwrap().height() / 2.);
-            let mut buildable_road = HashMap::new();
 
-            for (road, player) in catan.inner.roads() {
-                if *player == catan.me {
-                    for candidate in catan.inner.point_get_points(road.start) {
-                        if let Some(candidate) = candidate {
-                            let road = Line::new(road.start, candidate);
-                            if catan.inner.roads().get(&road).is_none() {
-                                buildable_road.insert(road, ());
-                            }
-                        }
-                    }
-                    for candidate in catan.inner.point_get_points(road.end) {
-                        if let Some(candidate) = candidate {
-                            let road = Line::new(road.end, candidate);
-                            if catan.inner.roads().get(&road).is_none() {
-                                buildable_road.insert(road, ());
-                            }
-                        }
-                    }
-                }
-            }
-
-            for (road, _) in buildable_road {
-                if x > (catan.points[road.start.x][road.start.y]
-                    + catan.points[road.end.x][road.end.y])
-                    .x
-                    / 2.
-                    - catan.radius * 0.2
-                    && x < (catan.points[road.start.x][road.start.y]
-                        + catan.points[road.end.x][road.end.y])
-                        .x
-                        / 2.
-                        + catan.radius * 0.2
-                    && y > (catan.points[road.start.x][road.start.y]
-                        + catan.points[road.end.x][road.end.y])
-                        .y
-                        / 2.
-                        - catan.radius * 0.2
-                    && y < (catan.points[road.start.x][road.start.y]
-                        + catan.points[road.end.x][road.end.y])
-                        .y
-                        / 2.
-                        + catan.radius * 0.2
+            for (_, road) in paths.iter() {
+                let point = (catan.points[road.line.start.x][road.line.start.y]
+                    + catan.points[road.line.end.x][road.line.end.y])
+                    / 2.0;
+                if x > point.x - catan.radius * 0.25
+                    && x < point.x + catan.radius * 0.25
+                    && y > point.y - catan.radius * 0.25
+                    && y < point.y + catan.radius * 0.25
                 {
                     let me = catan.me;
-                    catan.players[me].inner.resources[TileKind::Brick as usize] -= 1;
-                    catan.players[me].inner.resources[TileKind::Wood as usize] -= 1;
-                    action_writer.send(GameAct::BuildRoad(road.start, road.end).into());
-                    next_state.set(CatanState::Menu);
+                    if road.boat && road.road {
+                        catan.path_building = Some(road.line);
+                        next_state.set(CatanState::BoatRoadBuild)
+                    } else if road.boat {
+                        catan.players[me].inner.resources[TileKind::Wool as usize] -= 1;
+                        catan.players[me].inner.resources[TileKind::Wood as usize] -= 1;
+                        action_writer.send(GameAct::BuildBoat(road.line).into());
+                        next_state.set(CatanState::Menu);
+                    } else if road.road {
+                        catan.players[me].inner.resources[TileKind::Brick as usize] -= 1;
+                        catan.players[me].inner.resources[TileKind::Wood as usize] -= 1;
+                        action_writer.send(GameAct::BuildRoad(road.line).into());
+                        next_state.set(CatanState::Menu);
+                    }
+
                     break;
                 }
             }
@@ -390,7 +371,8 @@ fn check_build_road(
 
 fn check_road_building_build_road(
     windows: Query<&Window>, mouse_button_input: Res<ButtonInput<MouseButton>>,
-    mut catan: ResMut<Catan>, mut next_state: ResMut<NextState<CatanState>>,
+    paths: Query<(Entity, &BuildableCatanPath)>, mut catan: ResMut<Catan>,
+    mut next_state: ResMut<NextState<CatanState>>,
     mut next_card_state: ResMut<NextState<UseCardState>>,
     mut action_writer: ConsumableEventWriter<GameAction>,
 ) {
@@ -399,60 +381,23 @@ fn check_road_building_build_road(
         if let Some(mouse) = windows.iter().next().unwrap().cursor_position() {
             let x = mouse.x - windows.iter().next().unwrap().width() / 2.;
             let y = -(mouse.y - windows.iter().next().unwrap().height() / 2.);
-            let mut buildable_road = HashMap::new();
-
-            for (road, player) in catan.inner.roads() {
-                if *player == catan.me {
-                    for candidate in catan.inner.point_get_points(road.start) {
-                        if let Some(candidate) = candidate {
-                            let road = Line::new(road.start, candidate);
-                            if catan.inner.roads().get(&road).is_none() {
-                                buildable_road.insert(road, ());
-                            }
-                        }
-                    }
-                    for candidate in catan.inner.point_get_points(road.end) {
-                        if let Some(candidate) = candidate {
-                            let road = Line::new(road.end, candidate);
-                            if catan.inner.roads().get(&road).is_none() {
-                                buildable_road.insert(road, ());
-                            }
-                        }
-                    }
-                }
-            }
-
-            for (road, _) in buildable_road {
-                if x > (catan.points[road.start.x][road.start.y]
-                    + catan.points[road.end.x][road.end.y])
-                    .x
-                    / 2.
-                    - catan.radius * 0.2
-                    && x < (catan.points[road.start.x][road.start.y]
-                        + catan.points[road.end.x][road.end.y])
-                        .x
-                        / 2.
-                        + catan.radius * 0.2
-                    && y > (catan.points[road.start.x][road.start.y]
-                        + catan.points[road.end.x][road.end.y])
-                        .y
-                        / 2.
-                        - catan.radius * 0.2
-                    && y < (catan.points[road.start.x][road.start.y]
-                        + catan.points[road.end.x][road.end.y])
-                        .y
-                        / 2.
-                        + catan.radius * 0.2
-                    && Some(road) != catan.road_building
+            for (_, road) in paths.iter() {
+                let point = (catan.points[road.line.start.x][road.line.start.y]
+                    + catan.points[road.line.end.x][road.line.end.y])
+                    / 2.0;
+                if x > point.x - catan.radius * 0.25
+                    && x < point.x + catan.radius * 0.25
+                    && y > point.y - catan.radius * 0.25
+                    && y < point.y + catan.radius * 0.25
                 {
-                    if catan.road_building.is_none() {
-                        catan.road_building = Some(road);
+                    if catan.path_building.is_none() {
+                        catan.path_building = Some(road.line);
                     } else {
-                        let road1 = catan.road_building.take().unwrap();
+                        let road1 = catan.path_building.take().unwrap();
                         action_writer.send(
                             GameAct::UseDevelopmentCard((
                                 DevCard::RoadBuilding,
-                                DevelopmentCard::RoadBuilding([road1, road]),
+                                DevelopmentCard::RoadBuilding([road1, road.line]),
                             ))
                             .into(),
                         );
@@ -496,30 +441,49 @@ fn check_steal_target(
     }
 }
 
-fn draw_steal_target(
-    windows: Query<&Window>, mut painter: ShapePainter, catan: Res<Catan>,
-    img_store: Res<ImageStore>,
+#[derive(Component)]
+struct StealTarget {
+    idx: usize,
+}
+
+fn update_steal_target_spawn(
+    mut steal_targets: Query<(&StealTarget, &mut Sprite, &mut Transform)>,
+    windows: Query<&Window>,
 ) {
     for window in windows.iter() {
-        painter.color = Color::rgb(0.0, 0.0, 0.0);
-        painter.translate(Vec3::new(0., 0., TRADEBPARD_LAYER));
-        painter.rect(Vec2 {
-            x: window.width() * 0.7,
-            y: window.height() * 0.7,
-        });
         let icon_size = window.width() * 0.1;
-        for (i, player) in catan.stealing_candidate.iter().enumerate() {
-            painter.reset();
-            painter.translate(Vec3::new(
-                -window.width() * 0.35 + icon_size / 2.0 + icon_size * i as f32,
+        for (steal_target, mut sprite, mut transform) in steal_targets.iter_mut() {
+            transform.translation = Vec3::new(
+                -window.width() * 0.35
+                    + icon_size / 2.0
+                    + icon_size * steal_target.idx as f32,
                 0.0,
                 TRADEBPARD_LAYER + 0.1,
-            ));
-            painter.image(
-                img_store.settlement_img[*player].clone(),
-                Vec2::new(icon_size, icon_size),
             );
+            sprite.custom_size = Some(Vec2::new(icon_size, icon_size));
         }
+    }
+}
+
+fn despawn_steal_target(
+    mut commands: Commands, steal_targets: Query<(Entity, &StealTarget)>,
+) {
+    for (entity, _) in steal_targets.iter() {
+        commands.entity(entity).despawn_recursive();
+    }
+}
+
+fn spawn_steal_target(
+    mut commands: Commands, catan: Res<Catan>, img_store: Res<ImageStore>,
+) {
+    for (i, player) in catan.stealing_candidate.iter().enumerate() {
+        commands.spawn((
+            StealTarget { idx: i },
+            SpriteBundle {
+                texture: img_store.settlement_img[*player].clone(),
+                ..Default::default()
+            },
+        ));
     }
 }
 
@@ -552,7 +516,7 @@ fn check_select_robber(
                                 match catan.inner.point(point).owner() {
                                     Some(owner) => {
                                         if owner != catan.me {
-                                            catan.stealing_candidate.insert(owner);
+                                            catan.stealing_candidate.push(owner);
                                         }
                                     },
                                     None => continue,
@@ -643,7 +607,7 @@ fn check_knight_select_robber(
                                 match catan.inner.point(point).owner() {
                                     Some(owner) => {
                                         if owner != catan.me {
-                                            catan.stealing_candidate.insert(owner);
+                                            catan.stealing_candidate.push(owner);
                                         }
                                     },
                                     None => continue,
@@ -681,6 +645,9 @@ struct CatanTile {
     y: usize,
 }
 
+#[derive(Component)]
+struct CatanTileDiceNumber;
+
 impl From<Coordinate> for CatanTile {
     fn from(coord: Coordinate) -> Self {
         CatanTile {
@@ -713,39 +680,165 @@ struct CatanRoad {
     line: Line,
 }
 
-#[derive(Component)]
-struct BuildableCatanRoad {
+#[derive(Component, PartialEq, Eq, Hash)]
+struct BuildableCatanPath {
     line: Line,
+    road: bool,
+    boat: bool,
 }
 
-fn update_buildable_roads_spawn(
-    mut roads: Query<(&mut Transform, &mut Sprite, &BuildableCatanRoad)>,
+#[derive(Component, Clone, Copy)]
+#[repr(u8)]
+enum BoatRoad {
+    Road,
+    Boat,
+}
+
+#[derive(Component, Clone, Copy)]
+struct BoatRoadSelect;
+
+fn check_boat_road_select(
+    windows: Query<&Window>, mouse_button_input: Res<ButtonInput<MouseButton>>,
+    mut catan: ResMut<Catan>, mut next_state: ResMut<NextState<CatanState>>,
+    state: Res<State<CatanState>>, mut action_writer: ConsumableEventWriter<GameAction>,
+) {
+    if mouse_button_input.just_pressed(MouseButton::Left) {
+        let window = windows.iter().next().unwrap();
+        // convert the mouse position to the window position
+        if let Some(mouse) = window.cursor_position() {
+            let x = mouse.x - window.width() / 2.;
+            let y = -(mouse.y - window.height() / 2.);
+            if x > -window.height() * 0.2
+                && x < -window.height() * 0.1
+                && y > -window.height() * 0.3
+                && y < -window.height() * 0.2
+            {
+                action_writer
+                    .send(GameAct::BuildRoad(catan.path_building.take().unwrap()).into());
+                if state.eq(&CatanState::BoatRoadBuild) {
+                    let me = catan.me;
+                    catan.players[me].inner.resources[TileKind::Wood as usize] -= 1;
+                    catan.players[me].inner.resources[TileKind::Wool as usize] -= 1;
+                }
+                next_state.set(CatanState::Menu);
+                return;
+            }
+
+            if x > window.height() * 0.1
+                && x < window.height() * 0.2
+                && y > -window.height() * 0.3
+                && y < -window.height() * 0.2
+            {
+                action_writer
+                    .send(GameAct::BuildBoat(catan.path_building.take().unwrap()).into());
+                if state.eq(&CatanState::BoatRoadBuild) {
+                    let me = catan.me;
+                    catan.players[me].inner.resources[TileKind::Wood as usize] -= 1;
+                    catan.players[me].inner.resources[TileKind::Brick as usize] -= 1;
+                }
+                next_state.set(CatanState::Menu);
+                return;
+            }
+        }
+    }
+}
+
+fn update_road_boat_select_opt(
+    mut opt: Query<(&mut Transform, &mut Sprite, &BoatRoad)>, windows: Query<&Window>,
+) {
+    for window in windows.iter() {
+        let size = window.height() * 0.1;
+        for (mut transform, mut sprite, boat_road) in opt.iter_mut() {
+            transform.translation =
+                Vec3::new(-size + 2.0 * (*boat_road as usize) as f32 * size, 0.0, 0.1);
+            sprite.custom_size = Some(Vec2::new(size, size));
+        }
+    }
+}
+
+fn update_road_boat_select(
+    mut select: Query<(&mut Transform, &mut Sprite, &BoatRoadSelect)>,
+    windows: Query<&Window>,
+) {
+    for window in windows.iter() {
+        let (mut transform, mut sprite, _) = select.single_mut();
+        *transform = Transform::from_translation(Vec3::new(
+            0.0,
+            -window.height() * 0.25,
+            BOARD_LAYER,
+        ));
+        sprite.custom_size = Some(Vec2::new(window.width(), window.height() * 0.1));
+    }
+}
+
+fn despawn_road_boat_select(
+    mut commands: Commands, select: Query<(Entity, &BoatRoadSelect)>,
+) {
+    for (entity, _) in select.iter() {
+        commands.entity(entity).despawn_recursive();
+    }
+}
+
+fn spawn_road_boat_select(
+    mut commands: Commands, catan: Res<Catan>, image_store: Res<ImageStore>,
+) {
+    commands
+        .spawn((
+            BoatRoadSelect,
+            SpriteBundle {
+                sprite: Sprite {
+                    color: Color::rgba(1.0, 1.0, 1.0, 0.5),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ))
+        .with_children(|commands| {
+            commands.spawn((
+                BoatRoad::Road,
+                SpriteBundle {
+                    texture: image_store.road_img[catan.me].clone(),
+                    ..Default::default()
+                },
+            ));
+            commands.spawn((
+                BoatRoad::Boat,
+                SpriteBundle {
+                    texture: image_store.boat_img[catan.me].clone(),
+                    ..Default::default()
+                },
+            ));
+        });
+}
+
+fn update_buildable_paths_spawn(
+    mut roads: Query<(&mut Transform, &mut Sprite, &BuildableCatanPath)>,
     catan: Res<Catan>,
 ) {
-    for (mut transform, mut sprite, road) in roads.iter_mut() {
-        transform.translation = (catan.points[road.line.start.x][road.line.start.y]
-            + catan.points[road.line.end.x][road.line.end.y])
+    for (mut transform, mut sprite, path) in roads.iter_mut() {
+        transform.translation = (catan.points[path.line.start.x][path.line.start.y]
+            + catan.points[path.line.end.x][path.line.end.y])
             / 2.0;
         sprite.custom_size = Some(Vec2::new(catan.radius * 0.5, catan.radius));
         transform.rotation = Quat::from_rotation_z(road_get_rotate(
-            catan.points[road.line.start.x][road.line.start.y],
-            catan.points[road.line.end.x][road.line.end.y],
+            catan.points[path.line.start.x][path.line.start.y],
+            catan.points[path.line.end.x][path.line.end.y],
         ));
         sprite.color = Color::rgba(1.0, 1.0, 1.0, 0.5);
     }
 }
 
-fn despawn_buildable_roads(
-    mut commands: Commands, roads: Query<(Entity, &BuildableCatanRoad)>,
+fn despawn_buildable_paths(
+    mut commands: Commands, paths: Query<(Entity, &BuildableCatanPath)>,
 ) {
     info!("despawn_buildable_roads entity: ");
-    for (entity, _) in roads.iter() {
+    for (entity, _) in paths.iter() {
         info!("despawn_buildable_roads entity: {:?}", entity);
         commands.entity(entity).despawn();
     }
 }
 
-fn spawn_initable_roads(
+fn spawn_initable_paths(
     mut commands: Commands, catan: Res<Catan>, image_store: Res<ImageStore>,
 ) {
     for i in 0..catan.points.len() {
@@ -755,12 +848,25 @@ fn spawn_initable_roads(
                 if player == catan.me {
                     for candidate in catan.inner.point_get_points(point) {
                         if let Some(candidate) = candidate {
-                            let road = Line::new(point, candidate);
-                            if catan.inner.roads().get(&road).is_none() {
+                            let path = Line::new(point, candidate);
+                            let can_build_road =
+                                catan.inner.check_valid_buildable_road(path);
+                            let can_build_boat =
+                                catan.inner.check_valid_buildable_boat(path);
+
+                            if can_build_boat || can_build_road {
                                 commands.spawn((
-                                    BuildableCatanRoad { line: road },
+                                    BuildableCatanPath {
+                                        line: path,
+                                        road: can_build_road,
+                                        boat: can_build_boat,
+                                    },
                                     SpriteBundle {
-                                        texture: image_store.road_img[catan.me].clone(),
+                                        texture: if can_build_road {
+                                            image_store.road_img[catan.me].clone()
+                                        } else {
+                                            image_store.boat_img[catan.me].clone()
+                                        },
                                         sprite: Sprite {
                                             custom_size: Some(Vec2::new(0.0, 0.0)),
                                             ..Default::default()
@@ -777,55 +883,151 @@ fn spawn_initable_roads(
     }
 }
 
-fn spawn_buildable_roads(
+fn spawn_buildable_paths(
     mut commands: Commands, catan: Res<Catan>, image_store: Res<ImageStore>,
+    state: Res<State<CatanState>>,
 ) {
-    for (road, player) in catan.inner.roads() {
-        if *player == catan.me {
-            for candidate in catan.inner.point_get_points(road.start) {
-                if let Some(candidate) = candidate {
-                    let road = Line::new(road.start, candidate);
-                    if catan.inner.roads().get(&road).is_none()
-                        && catan.inner.point_valid(candidate)
-                        && Some(road) != catan.road_building
-                    {
-                        commands.spawn((
-                            BuildableCatanRoad { line: road },
-                            SpriteBundle {
-                                texture: image_store.road_img[catan.me].clone(),
-                                sprite: Sprite {
-                                    custom_size: Some(Vec2::new(0.0, 0.0)),
-                                    ..Default::default()
-                                },
-                                ..Default::default()
-                            },
-                        ));
+    let mut buildable = HashMap::new();
+    if !state.eq(&CatanState::BuildBoat) {
+        for (road, player) in catan.inner.roads() {
+            if *player == catan.me {
+                for candidate in catan.inner.point_get_points(road.start) {
+                    if let Some(candidate) = candidate {
+                        let path = Line::new(road.start, candidate);
+                        if Some(path) != catan.path_building {
+                            if catan.inner.check_valid_buildable_road(path) {
+                                buildable.insert(path, (true, false));
+                            }
+                        }
+                    }
+                }
+                for candidate in catan.inner.point_get_points(road.end) {
+                    if let Some(candidate) = candidate {
+                        let path = Line::new(road.end, candidate);
+                        if Some(path) != catan.path_building {
+                            if catan.inner.check_valid_buildable_road(path) {
+                                buildable.insert(path, (true, false));
+                            }
+                        }
                     }
                 }
             }
-            for candidate in catan.inner.point_get_points(road.end) {
-                if let Some(candidate) = candidate {
-                    let road = Line::new(road.end, candidate);
-                    if catan.inner.roads().get(&road).is_none()
-                        && catan.inner.point_valid(candidate)
-                        && Some(road) != catan.road_building
-                    {
-                        commands.spawn((
-                            BuildableCatanRoad { line: road },
-                            SpriteBundle {
-                                texture: image_store.road_img[catan.me].clone(),
-                                sprite: Sprite {
-                                    custom_size: Some(Vec2::new(0.0, 0.0)),
-                                    ..Default::default()
-                                },
-                                ..Default::default()
-                            },
-                        ));
+        }
+
+        for i in 0..catan.points.len() {
+            for j in 0..catan.points[i].len() {
+                let point = Coordinate { x: i, y: j };
+                if let Some(player) = catan.inner.point(point).owner() {
+                    if player == catan.me {
+                        for candidate in catan.inner.point_get_points(point) {
+                            if let Some(candidate) = candidate {
+                                let road = Line::new(point, candidate);
+                                if catan.inner.check_valid_buildable_road(road)
+                                    && Some(road) != catan.path_building
+                                {
+                                    if catan.inner.check_valid_buildable_road(road) {
+                                        buildable.insert(road, (true, false));
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
     }
+
+    if !state.eq(&CatanState::BuildRoad) {
+        for (boat, player) in catan.inner.boats() {
+            if *player == catan.me {
+                for candidate in catan.inner.point_get_points(boat.start) {
+                    if let Some(candidate) = candidate {
+                        let path = Line::new(boat.start, candidate);
+                        if Some(path) != catan.path_building {
+                            if catan.inner.check_valid_buildable_boat(path) {
+                                match buildable.get(&path) {
+                                    Some((road, _)) => {
+                                        buildable.insert(path, (*road, true));
+                                    },
+                                    None => {
+                                        buildable.insert(path, (false, true));
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+                for candidate in catan.inner.point_get_points(boat.end) {
+                    if let Some(candidate) = candidate {
+                        let path = Line::new(boat.end, candidate);
+                        if Some(path) != catan.path_building {
+                            if catan.inner.check_valid_buildable_boat(path) {
+                                match buildable.get(&path) {
+                                    Some((road, _)) => {
+                                        buildable.insert(path, (*road, true));
+                                    },
+                                    None => {
+                                        buildable.insert(path, (false, true));
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for i in 0..catan.points.len() {
+            for j in 0..catan.points[i].len() {
+                let point = Coordinate { x: i, y: j };
+                if let Some(player) = catan.inner.point(point).owner() {
+                    if player == catan.me {
+                        for candidate in catan.inner.point_get_points(point) {
+                            if let Some(candidate) = candidate {
+                                let boat = Line::new(point, candidate);
+                                if catan.inner.check_valid_buildable_boat(boat)
+                                    && Some(boat) != catan.path_building
+                                {
+                                    if catan.inner.check_valid_buildable_road(boat) {
+                                        match buildable.get(&boat) {
+                                            Some((road, _)) => {
+                                                buildable.insert(boat, (*road, true));
+                                            },
+                                            None => {
+                                                buildable.insert(boat, (false, true));
+                                            },
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for (path, (can_build_road, can_build_boat)) in buildable {
+        commands.spawn((
+            BuildableCatanPath {
+                line: path,
+                road: can_build_road,
+                boat: can_build_boat,
+            },
+            SpriteBundle {
+                texture: image_store.road_img[catan.me].clone(),
+                sprite: Sprite {
+                    custom_size: Some(Vec2::new(0.0, 0.0)),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ));
+    }
+}
+
+#[derive(Component)]
+struct CatanBoat {
+    line: Line,
 }
 
 fn update_catan_road_spawn(
@@ -867,6 +1069,34 @@ fn spawn_catan_road(commands: &mut Commands, road: Line, img: Handle<Image>) {
     ));
 }
 
+fn update_catan_boat_spawn(
+    mut roads: Query<(&mut Transform, &mut Sprite, &CatanBoat)>, catan: Res<Catan>,
+) {
+    for (mut transform, mut sprite, road) in roads.iter_mut() {
+        transform.translation = (catan.points[road.line.start.x][road.line.start.y]
+            + catan.points[road.line.end.x][road.line.end.y])
+            / 2.0;
+        sprite.custom_size = Some(Vec2::new(catan.radius * 0.5, catan.radius));
+        transform.rotation = Quat::from_rotation_z(road_get_rotate(
+            catan.points[road.line.start.x][road.line.start.y],
+            catan.points[road.line.end.x][road.line.end.y],
+        ));
+    }
+}
+
+fn spawn_catan_boat(commands: &mut Commands, road: Line, img: Handle<Image>) {
+    commands.spawn((
+        CatanBoat { line: road },
+        SpriteBundle {
+            texture: img,
+            sprite: Sprite {
+                custom_size: Some(Vec2::new(0.0, 0.0)),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    ));
+}
 #[derive(Component)]
 struct CatanHarbor {
     location: Line,
@@ -933,12 +1163,20 @@ fn update_catan_tiles_spawn(
         };
 
         if (state.eq(&CatanState::SelectRobber) || card_state.eq(&UseCardState::Knight))
-            && catan.inner.tile(coord).kind().is_resource()
+            && catan.inner.tile(coord).kind().is_resource_or_gold()
         {
             sprite.color = Color::rgba(1.0, 1.0, 1.0, 0.5);
         } else {
             sprite.color = Color::rgba(1.0, 1.0, 1.0, 1.0);
         }
+    }
+}
+
+fn update_catan_tiles_number_spawn(
+    mut tiles: Query<(&mut Sprite, &CatanTileDiceNumber)>, catan: Res<Catan>,
+) {
+    for (mut sprite, _) in tiles.iter_mut() {
+        sprite.custom_size = Some(Vec2::new(catan.radius, catan.radius));
     }
 }
 
@@ -963,7 +1201,9 @@ fn update_catan_points_spawn(
             y: point.y,
         };
         *img = Handle::default();
-        if catan.inner.point_valid(coord) && catan.inner.point(coord).owner().is_some() {
+        if catan.inner.point_valid_settlement(coord)
+            && catan.inner.point(coord).owner().is_some()
+        {
             if !catan.inner.point(coord).is_city() {
                 *img = img_store.settlement_img
                     [catan.inner.point(coord).owner().unwrap()]
@@ -975,10 +1215,11 @@ fn update_catan_points_spawn(
             *visibility = Visibility::Visible;
         }
         if state.eq(&CatanState::BuidSettlement)
-            && catan.inner.point_valid(coord)
+            && catan.inner.point_valid_settlement(coord)
             && catan.inner.point(coord).owner().is_none()
             && catan.players[catan.me].inner.can_build_settlement()
-            && catan.players[catan.me].inner.have_roads_to(coord)
+            && (catan.players[catan.me].inner.have_roads_to(coord)
+                || catan.players[catan.me].inner.have_boats_to(coord))
             && !catan.inner.point_get_points(coord).iter().any(|&p| {
                 if let Some(p) = p {
                     catan.inner.point(p).is_owned()
@@ -1000,7 +1241,7 @@ fn update_catan_points_spawn(
             *visibility = Visibility::Visible;
             sprite.color = Color::rgba(1.0, 1.0, 1.0, 0.5);
         } else if state.eq(&CatanState::InitSettlement)
-            && catan.inner.point_valid(coord)
+            && catan.inner.point_valid_settlement(coord)
             && catan.inner.point(coord).owner().is_none()
             && !catan.inner.point_get_points(coord).iter().any(|&p| {
                 if let Some(p) = p {
@@ -1111,21 +1352,24 @@ fn spawn_catan_tiles(
                             ..Default::default()
                         },
                     ))
-                    .with_children(|parent| match catan.inner.tile(coord).number() {
-                        Some(number) => {
-                            parent.spawn(SpriteBundle {
-                                texture: img_store.number_img[number].clone(),
-                                sprite: Sprite {
-                                    custom_size: Some(Vec2::new(0.0, 0.0)),
-                                    ..Default::default()
+                    .with_children(|parent| {
+                        if catan.inner.tile(coord).kind().is_resource_or_gold() {
+                            match catan.inner.tile(coord).number() {
+                                Some(number) => {
+                                    parent.spawn((
+                                        CatanTileDiceNumber,
+                                        SpriteBundle {
+                                            texture: img_store.number_img[number].clone(),
+                                            transform: Transform::from_translation(
+                                                Vec3::new(0.0, 0.0, 0.1),
+                                            ),
+                                            ..Default::default()
+                                        },
+                                    ));
                                 },
-                                transform: Transform::from_translation(Vec3::new(
-                                    0.0, 0.0, 0.1,
-                                )),
-                                ..Default::default()
-                            });
-                        },
-                        _ => {},
+                                _ => {},
+                            }
+                        }
                     });
             }
         }
@@ -1171,6 +1415,7 @@ enum Operation {
     BuildSettlement,
     BuildCity,
     BuildRoad,
+    BuildBoat,
     Trade,
     BuyCard,
     UseCard,
@@ -1183,11 +1428,12 @@ impl From<usize> for Operation {
             0 => Operation::BuildSettlement,
             1 => Operation::BuildCity,
             2 => Operation::BuildRoad,
-            3 => Operation::Trade,
-            4 => Operation::BuyCard,
-            5 => Operation::UseCard,
-            6 => Operation::EndTurn,
-            _ => unreachable!(),
+            3 => Operation::BuildBoat,
+            4 => Operation::Trade,
+            5 => Operation::BuyCard,
+            6 => Operation::UseCard,
+            7 => Operation::EndTurn,
+            _ => Operation::BuildSettlement,
         }
     }
 }
@@ -1263,69 +1509,52 @@ fn check_year_of_plenty_click(
     }
 }
 
-fn draw_year_of_plenty(
-    mut painter: ShapePainter, catan: Res<Catan>, windows: Query<&Window>,
-    img_store: Res<ImageStore>,
+#[derive(Component)]
+struct YearOfPlentyEntry {
+    idx: usize,
+}
+
+fn update_year_of_plenty_spawn(
+    mut year_of_plenty: Query<(&mut Transform, &mut Sprite, &YearOfPlentyEntry)>,
+    windows: Query<&Window>,
 ) {
     for window in windows.iter() {
-        painter.color = Color::rgb(0.0, 0.0, 0.0);
         let card_board_x_size = window.width();
         let card_board_y_size = window.height() * 0.2;
+        let card_size = card_board_y_size * 0.9;
+        let xoffset = -card_board_x_size / 2. + card_size / 2.;
+        for (mut transform, mut sprite, entry) in year_of_plenty.iter_mut() {
+            transform.translation = Vec3::new(
+                xoffset + card_size * entry.idx as f32,
+                0.0,
+                TRADEBPARD_LAYER + 0.1,
+            );
+            sprite.custom_size = Some(Vec2::new(card_size, card_size));
+        }
+    }
+}
 
-        let board_translate = Vec3 {
-            x: 0.0,
-            y: 0.0,
-            z: TRADEBPARD_LAYER,
-        };
+fn despawn_year_of_plenty(
+    mut commands: Commands, year_of_plenty: Query<(Entity, &YearOfPlentyEntry)>,
+) {
+    for (entity, _) in year_of_plenty.iter() {
+        commands.entity(entity).despawn_recursive();
+    }
+}
 
-        painter.translate(board_translate);
-        painter.with_children(|spawn_children| {
-            let config = spawn_children.config().clone();
-            let card_size = card_board_y_size * 0.9;
-            let xoffset = -card_board_x_size / 2. + card_size / 2.;
-            let mut i = 0;
-            for (kind, img) in img_store.resource_img.iter() {
-                if *kind != TileKind::Dessert && *kind != TileKind::Empty {
-                    let size = Vec2 {
-                        x: card_size,
-                        y: card_size,
-                    };
-                    spawn_children.set_config(config.clone());
-                    spawn_children.translate(Vec3 {
-                        x: xoffset + card_size * i as f32,
-                        y: 0.0,
-                        z: 0.1,
-                    });
-                    if catan.selected_yop.is_some()
-                        && catan.selected_yop.unwrap() == *kind
-                    {
-                        spawn_children.color = Color::rgb(1.0, 1.0, 1.0);
-                        spawn_children.rect(Vec2 {
-                            x: card_size,
-                            y: card_size,
-                        });
-                        spawn_children.translate(Vec3 {
-                            x: 0.0,
-                            y: 0.0,
-                            z: 0.1,
-                        });
-                    }
-                    spawn_children.image(img.clone(), size);
-                    spawn_children.translate(Vec3 {
-                        x: 0.0,
-                        y: 0.0,
-                        z: 0.1,
-                    });
-                    spawn_children.image(
-                        img_store.number_img
-                            [catan.players[catan.me].inner.resources[*kind as usize]]
-                            .clone(),
-                        Vec2::new(size.x * 0.5, size.y * 0.5),
-                    );
-                    i += 1;
-                }
-            }
-        });
+fn spawn_year_of_plenty(mut commands: Commands, img_store: Res<ImageStore>) {
+    let mut i = 0;
+    for (kind, img) in img_store.resource_img.iter() {
+        if kind.is_resource() {
+            commands.spawn((
+                YearOfPlentyEntry { idx: i },
+                SpriteBundle {
+                    texture: img.clone(),
+                    ..Default::default()
+                },
+            ));
+            i += 1;
+        }
     }
 }
 
@@ -1370,55 +1599,59 @@ fn check_monopoly_click(
     }
 }
 
-fn draw_monopoly(
-    mut painter: ShapePainter, catan: ResMut<Catan>, windows: Query<&Window>,
-    img_store: Res<ImageStore>,
+#[derive(Component)]
+struct MonopolyEntry {
+    idx: usize,
+}
+
+fn update_monopoly_spawn(
+    mut monopoly: Query<(&mut Transform, &mut Sprite, &MonopolyEntry)>,
+    windows: Query<&Window>,
 ) {
     for window in windows.iter() {
-        painter.color = Color::rgb(0.0, 0.0, 0.0);
         let card_board_x_size = window.width();
         let card_board_y_size = window.height() * 0.2;
-
+        let card_size = card_board_y_size * 0.9;
+        let xoffset = -card_board_x_size / 2. + card_size / 2.;
         let board_translate = Vec3 {
             x: 0.0,
             y: 0.0,
             z: TRADEBPARD_LAYER,
         };
+        for (mut transform, mut sprite, entry) in monopoly.iter_mut() {
+            transform.translation = board_translate
+                + Vec3 {
+                    x: xoffset + card_size * entry.idx as f32,
+                    y: 0.0,
+                    z: 0.1,
+                };
+            sprite.custom_size = Some(Vec2 {
+                x: card_size,
+                y: card_size,
+            });
+        }
+    }
+}
 
-        painter.translate(board_translate);
-        painter.with_children(|spawn_children| {
-            let config = spawn_children.config().clone();
-            let card_size = card_board_y_size * 0.9;
-            let xoffset = -card_board_x_size / 2. + card_size / 2.;
-            let mut i = 0;
-            for (kind, img) in img_store.resource_img.iter() {
-                if *kind != TileKind::Dessert && *kind != TileKind::Empty {
-                    let size = Vec2 {
-                        x: card_size,
-                        y: card_size,
-                    };
-                    spawn_children.set_config(config.clone());
-                    spawn_children.translate(Vec3 {
-                        x: xoffset + card_size * i as f32,
-                        y: 0.0,
-                        z: 0.1,
-                    });
-                    spawn_children.image(img.clone(), size);
-                    spawn_children.translate(Vec3 {
-                        x: 0.0,
-                        y: 0.0,
-                        z: 0.1,
-                    });
-                    spawn_children.image(
-                        img_store.number_img
-                            [catan.players[catan.me].inner.resources[*kind as usize]]
-                            .clone(),
-                        Vec2::new(size.x * 0.5, size.y * 0.5),
-                    );
-                    i += 1;
-                }
-            }
-        });
+fn despawn_monopoly(mut commands: Commands, monopoly: Query<(Entity, &MonopolyEntry)>) {
+    for (entity, _) in monopoly.iter() {
+        commands.entity(entity).despawn_recursive();
+    }
+}
+
+fn spawn_monopoly(mut commands: Commands, img_store: Res<ImageStore>) {
+    let mut i = 0;
+    for (kind, img) in img_store.resource_img.iter() {
+        if kind.is_resource() {
+            commands.spawn((
+                MonopolyEntry { idx: i },
+                SpriteBundle {
+                    texture: img.clone(),
+                    ..Default::default()
+                },
+            ));
+            i += 1;
+        }
     }
 }
 
@@ -1600,52 +1833,6 @@ fn spawn_use_development_card(
         });
 }
 
-fn draw_development_card(
-    mut painter: ShapePainter, catan: ResMut<Catan>, windows: Query<&Window>,
-    img_store: Res<ImageStore>,
-) {
-    for window in windows.iter() {
-        painter.color = Color::rgb(0.0, 0.0, 0.0);
-        let card_board_x_size = window.width();
-        let card_board_y_size = window.height() * 0.2;
-
-        let board_translate = Vec3 {
-            x: 0.0,
-            y: 0.0,
-            z: TRADEBPARD_LAYER,
-        };
-
-        painter.translate(board_translate);
-        painter.with_children(|spawn_children| {
-            let config = spawn_children.config().clone();
-            let card_size = card_board_y_size * 0.9;
-            let xoffset = -card_board_x_size / 2. + card_size / 2.;
-            for (i, card) in img_store.card_img.iter().enumerate() {
-                let size = Vec2 {
-                    x: card_size,
-                    y: card_size,
-                };
-                spawn_children.set_config(config.clone());
-                spawn_children.translate(Vec3 {
-                    x: xoffset + card_size * i as f32,
-                    y: 0.0,
-                    z: 0.1,
-                });
-                spawn_children.image(card.clone(), size);
-                spawn_children.translate(Vec3 {
-                    x: 0.0,
-                    y: 0.0,
-                    z: 0.1,
-                });
-                spawn_children.image(
-                    img_store.number_img[catan.players[catan.me].inner.cards[i]].clone(),
-                    Vec2::new(size.x * 0.5, size.y * 0.5),
-                );
-            }
-        });
-    }
-}
-
 #[derive(Component)]
 struct CatanResource {
     kind: TileKind,
@@ -1808,6 +1995,15 @@ fn check_menu_click(
                                 }
                             }
                         },
+                        Operation::BuildBoat => {
+                            if catan.players[catan.me].inner.can_build_boat() {
+                                if state.eq(&CatanState::BuildBoat) {
+                                    next_state.set(CatanState::Menu);
+                                } else {
+                                    next_state.set(CatanState::BuildBoat);
+                                }
+                            }
+                        },
                         Operation::Trade => {
                             if catan.players[catan.me].inner.can_trade() {
                                 if state.eq(&CatanState::Trade) {
@@ -1903,7 +2099,7 @@ fn spawn_operation(
 fn spawn_operations(
     commands: &mut Commands, catan: &mut Catan, img_store: &ResMut<ImageStore>,
 ) {
-    for i in 0..7 {
+    for i in 0..Operation::EndTurn as usize + 1 {
         spawn_operation(commands, Operation::from(i), img_store);
         catan.operations.push(OperationEntry {
             tranform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.0)),
@@ -1920,11 +2116,15 @@ enum Dice {
 }
 
 fn update_dices_spawn(
-    mut operations: Query<(&mut Transform, &mut Sprite, &Dice)>, catan: Res<Catan>,
+    mut operations: Query<(&mut Transform, &mut Handle<Image>, &mut Sprite, &Dice)>,
+    catan: Res<Catan>, img_store: Res<ImageStore>,
 ) {
-    for (mut transform, mut sprite, dice) in operations.iter_mut() {
+    for (mut transform, mut img, mut sprite, dice) in operations.iter_mut() {
         *transform = catan.dices[*dice as usize].tranform;
         sprite.custom_size = Some(catan.dices[*dice as usize].size);
+        *img = img_store.dice_img
+            [(catan.dices[*dice as usize].nubmer as usize).saturating_sub(1)]
+        .clone();
     }
 }
 
@@ -1933,15 +2133,15 @@ fn update_dices_transform(mut catan: ResMut<Catan>, windows: Query<&Window>) {
         let board_translate = Vec3 {
             x: 0.0,
             y: -window.height() * 0.25,
-            z: 0.0,
+            z: 0.1,
         };
         let dice_size = window.width().min(window.height()) * 0.1;
         catan.dices[Dice::Dice1 as usize].tranform =
             Transform::from_translation(board_translate - Vec3::new(dice_size, 0.0, 0.0));
         catan.dices[Dice::Dice1 as usize].size = Vec2::new(dice_size, dice_size);
+
         catan.dices[Dice::Dice2 as usize].tranform =
             Transform::from_translation(board_translate + Vec3::new(dice_size, 0.0, 0.0));
-
         catan.dices[Dice::Dice2 as usize].size = Vec2::new(dice_size, dice_size);
     }
 }
@@ -1951,10 +2151,6 @@ fn spawn_dices(commands: &mut Commands, _: &mut Catan, img_store: &ResMut<ImageS
         Dice::Dice1,
         SpriteBundle {
             texture: img_store.dice_img[1].clone(),
-            sprite: Sprite {
-                custom_size: Some(Vec2::new(0.0, 0.0)),
-                ..Default::default()
-            },
             ..Default::default()
         },
     ));
@@ -1962,11 +2158,6 @@ fn spawn_dices(commands: &mut Commands, _: &mut Catan, img_store: &ResMut<ImageS
         Dice::Dice2,
         SpriteBundle {
             texture: img_store.dice_img[1].clone(),
-            sprite: Sprite {
-                custom_size: Some(Vec2::new(0.0, 0.0)),
-                ..Default::default()
-            },
-            visibility: Visibility::Hidden,
             ..Default::default()
         },
     ));
@@ -2122,6 +2313,43 @@ fn check_trade_offering_click(
                 && x < trade.draw.trade_size / 2.0
                 && y > trade.draw.trade_size
                 && y < trade.draw.trade_size * 2.0
+                && catan
+                    .inner
+                    .check_valid_local_trade(
+                        &Trade {
+                            from: catan.me,
+                            to: None,
+                            request: TradeRequest::new(
+                                trade
+                                    .resource
+                                    .offer
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, count)| {
+                                        (
+                                            TileKind::try_from(i as u8).unwrap(),
+                                            *count as usize,
+                                        )
+                                    })
+                                    .collect(),
+                                trade
+                                    .resource
+                                    .want
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, count)| {
+                                        (
+                                            TileKind::try_from(i as u8).unwrap(),
+                                            *count as usize,
+                                        )
+                                    })
+                                    .collect(),
+                                TradeTarget::Bank,
+                            ),
+                        },
+                        &catan.players[catan.me].inner,
+                    )
+                    .is_ok()
             {
                 action_writer.send(
                     GameAct::TradeRequest(TradeRequest::new(
@@ -2155,6 +2383,43 @@ fn check_trade_offering_click(
                 && x < trade.draw.trade_size / 2.0
                 && y > 0.0
                 && y < trade.draw.trade_size
+                && catan
+                    .inner
+                    .check_valid_local_trade(
+                        &Trade {
+                            from: catan.me,
+                            to: None,
+                            request: TradeRequest::new(
+                                trade
+                                    .resource
+                                    .offer
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, count)| {
+                                        (
+                                            TileKind::try_from(i as u8).unwrap(),
+                                            *count as usize,
+                                        )
+                                    })
+                                    .collect(),
+                                trade
+                                    .resource
+                                    .want
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, count)| {
+                                        (
+                                            TileKind::try_from(i as u8).unwrap(),
+                                            *count as usize,
+                                        )
+                                    })
+                                    .collect(),
+                                TradeTarget::Harbor,
+                            ),
+                        },
+                        &catan.players[catan.me].inner,
+                    )
+                    .is_ok()
             {
                 action_writer.send(
                     GameAct::TradeRequest(TradeRequest::new(
@@ -2730,6 +2995,11 @@ fn spawn_trade(mut command: Commands, catan: ResMut<Catan>, img_store: Res<Image
                     color: Color::rgba(0.0, 0.0, 0.0, 0.9),
                     ..Default::default()
                 },
+                transform: Transform::from_translation(Vec3::new(
+                    0.0,
+                    0.0,
+                    TRADEBPARD_LAYER,
+                )),
                 ..Default::default()
             },
         ))
@@ -2798,8 +3068,8 @@ fn spawn_trade(mut command: Commands, catan: ResMut<Catan>, img_store: Res<Image
 
 #[derive(Default)]
 struct DropBoardDraw {
-    drop: HashMap<TileKind, (Vec3, Vec3)>,
-    yes: Vec3,
+    drop: HashMap<TileKind, Vec3>,
+    drop_size: f32,
     button_size: f32,
 }
 
@@ -2821,6 +3091,33 @@ impl DropBoard {
     }
 }
 
+#[derive(Component)]
+struct DropMarker;
+
+#[derive(Component)]
+struct DropResourceMarker {
+    tile: TileKind,
+}
+
+#[derive(Component)]
+struct DropResourceCntMarker {
+    tile: TileKind,
+}
+
+#[derive(Component)]
+struct DropResourceDropCntMarker {
+    tile: TileKind,
+}
+
+#[derive(Component)]
+struct DropAddMarker;
+
+#[derive(Component)]
+struct DropSubMarker;
+
+#[derive(Component)]
+struct DropConfirm;
+
 fn check_drop_click(
     windows: Query<&Window>, mouse_button_input: Res<ButtonInput<MouseButton>>,
     mut drop_board: ResMut<DropBoard>, mut catan: ResMut<Catan>,
@@ -2833,11 +3130,17 @@ fn check_drop_click(
             let x = mouse.x - windows.iter().next().unwrap().width() / 2.;
             let y = -(mouse.y - windows.iter().next().unwrap().height() / 2.);
 
-            for (kind, (add, sub)) in drop_board.draw.drop.iter() {
-                if x > add.x - drop_board.draw.button_size
-                    && x < add.x + drop_board.draw.button_size
-                    && y > add.y - drop_board.draw.button_size
-                    && y < add.y + drop_board.draw.button_size
+            for (kind, translate) in drop_board.draw.drop.iter() {
+                if x > translate.x + drop_board.draw.drop_size
+                    - drop_board.draw.button_size
+                    && x < translate.x
+                        + drop_board.draw.drop_size
+                        + drop_board.draw.button_size
+                    && y > translate.y + drop_board.draw.drop_size / 4.0
+                        - drop_board.draw.button_size
+                    && y < translate.y
+                        + drop_board.draw.drop_size / 4.0
+                        + drop_board.draw.button_size
                 {
                     let k = kind.clone();
 
@@ -2850,10 +3153,16 @@ fn check_drop_click(
                     }
                     return;
                 }
-                if x > sub.x - drop_board.draw.button_size
-                    && x < sub.x + drop_board.draw.button_size
-                    && y > sub.y - drop_board.draw.button_size
-                    && y < sub.y + drop_board.draw.button_size
+                if x > translate.x + drop_board.draw.drop_size
+                    - drop_board.draw.button_size
+                    && x < translate.x
+                        + drop_board.draw.drop_size
+                        + drop_board.draw.button_size
+                    && y > translate.y
+                        - drop_board.draw.drop_size / 4.0
+                        - drop_board.draw.button_size
+                    && y < translate.y - drop_board.draw.drop_size / 4.0
+                        + drop_board.draw.button_size
                 {
                     let k = kind.clone();
                     drop_board.resource.drop[k as usize] =
@@ -2861,10 +3170,10 @@ fn check_drop_click(
                     return;
                 }
 
-                if x > drop_board.draw.yes.x - drop_board.draw.yes.z
-                    && x < drop_board.draw.yes.x + drop_board.draw.yes.z
-                    && y > drop_board.draw.yes.y - drop_board.draw.yes.z
-                    && y < drop_board.draw.yes.y + drop_board.draw.yes.z
+                if x > -drop_board.draw.drop_size / 2.0
+                    && x < drop_board.draw.drop_size / 2.0
+                    && y > drop_board.draw.drop_size
+                    && y < drop_board.draw.drop_size * 2.0
                     && drop_board.resource.drop.iter().sum::<u8>() as usize
                         == catan.drop_cnt
                 {
@@ -2899,131 +3208,613 @@ fn check_drop_click(
     }
 }
 
-fn draw_drop_resource(
-    mut painter: ShapePainter, catan: ResMut<Catan>, windows: Query<&Window>,
-    img_store: Res<ImageStore>, mut drop_board: ResMut<DropBoard>,
+fn update_drop_confirm_spawn(
+    mut resources: Query<(&mut Transform, &mut Sprite, &mut Visibility, &DropConfirm)>,
+    drop_board: Res<DropBoard>, catan: Res<Catan>,
+) {
+    let (mut transform, mut sprite, mut visibility, _) = resources.single_mut();
+    transform.translation = Vec3::new(0.0, drop_board.draw.drop_size * 1.5, 0.1);
+    sprite.custom_size = Some(Vec2::new(
+        drop_board.draw.drop_size,
+        drop_board.draw.drop_size,
+    ));
+    if drop_board.resource.drop.iter().sum::<u8>() as usize == catan.drop_cnt {
+        *visibility = Visibility::Visible;
+    } else {
+        *visibility = Visibility::Hidden;
+    }
+}
+
+fn update_drop_resource_drop_cnt_marker_spawn(
+    mut resources: Query<(
+        &mut Transform,
+        &mut Sprite,
+        &mut Handle<Image>,
+        &DropResourceDropCntMarker,
+    )>,
+    drop_board: Res<DropBoard>, img_store: Res<ImageStore>,
+) {
+    for (mut transform, mut sprite, mut img, res) in resources.iter_mut() {
+        transform.translation = Vec3 {
+            x: drop_board.draw.drop_size * 1.25,
+            y: 0.,
+            z: 0.1,
+        };
+        *img = img_store.number_img[drop_board.resource.drop[res.tile as usize] as usize]
+            .clone();
+
+        sprite.custom_size = Some(Vec2::new(
+            drop_board.draw.drop_size * 0.5,
+            drop_board.draw.drop_size * 0.5,
+        ));
+    }
+}
+
+fn update_drop_resource_sub_marker_spawn(
+    mut resources: Query<(&mut Transform, &mut Sprite, &DropSubMarker)>,
+    drop_board: Res<DropBoard>,
+) {
+    for (mut transform, mut sprite, _) in resources.iter_mut() {
+        transform.translation = Vec3 {
+            x: drop_board.draw.drop_size,
+            y: -drop_board.draw.drop_size / 4.,
+            z: 0.,
+        };
+
+        sprite.custom_size = Some(Vec2::new(
+            drop_board.draw.drop_size * 0.5,
+            drop_board.draw.drop_size * 0.5,
+        ));
+    }
+}
+
+fn update_drop_resource_add_marker_spawn(
+    mut resources: Query<(&mut Transform, &mut Sprite, &DropAddMarker)>,
+    drop_board: Res<DropBoard>,
+) {
+    for (mut transform, mut sprite, _) in resources.iter_mut() {
+        transform.translation = Vec3 {
+            x: drop_board.draw.drop_size,
+            y: drop_board.draw.drop_size / 4.,
+            z: 0.,
+        };
+
+        sprite.custom_size = Some(Vec2::new(
+            drop_board.draw.drop_size * 0.5,
+            drop_board.draw.drop_size * 0.5,
+        ));
+    }
+}
+
+fn update_drop_resource_cnt_marker_spawn(
+    mut resources: Query<(&mut Sprite, &mut Handle<Image>, &DropResourceCntMarker)>,
+    drop_board: Res<DropBoard>, catan: Res<Catan>, img_store: Res<ImageStore>,
+) {
+    for (mut sprite, mut img, res) in resources.iter_mut() {
+        *img = img_store.number_img
+            [catan.players[catan.me].inner.resources[res.tile as usize] as usize]
+            .clone();
+        sprite.custom_size = Some(Vec2::new(
+            drop_board.draw.drop_size * 0.5,
+            drop_board.draw.drop_size * 0.5,
+        ));
+    }
+}
+
+fn update_drop_resource_marker_spawn(
+    mut resources: Query<(&mut Transform, &mut Sprite, &DropResourceMarker)>,
+    drop_board: Res<DropBoard>,
+) {
+    for (mut transform, mut sprite, res) in resources.iter_mut() {
+        transform.translation = drop_board.draw.drop[&res.tile];
+        sprite.custom_size = Some(Vec2::new(
+            drop_board.draw.drop_size,
+            drop_board.draw.drop_size,
+        ));
+    }
+}
+
+fn update_drop_resource_spawn(
+    mut drop: Query<(&mut Transform, &mut Sprite, &DropMarker)>, windows: Query<&Window>,
+    catan: Res<Catan>, mut drop_board: ResMut<DropBoard>,
 ) {
     for window in windows.iter() {
-        painter.color = Color::rgb(0.0, 0.0, 0.0);
         let trade_board_size = window.width().min(window.height()) * 0.8;
-        painter.translate(Vec3 {
-            x: 0.0,
-            y: 0.0,
-            z: TRADEBPARD_LAYER,
-        });
-        painter
-            .rect(Vec2 {
-                x: trade_board_size,
-                y: trade_board_size,
-            })
-            .with_children(|spawn_children| {
-                let config = spawn_children.config().clone();
-                let drop_size = trade_board_size
-                    / img_store
-                        .resource_img
-                        .iter()
-                        .filter(|res| res.0.is_resource())
-                        .count() as f32;
-                let mut i = 0;
-                for j in 0..catan.players[catan.me].inner.resources.len() {
-                    let kind = &TileKind::try_from(j as u8).unwrap();
-                    if !kind.is_resource() {
-                        continue;
-                    }
-                    let res = img_store.resource_img.get(kind).unwrap();
-                    let size = Vec2 {
-                        x: drop_size,
-                        y: drop_size,
-                    };
 
-                    //offer
-                    let translate = Vec3 {
-                        x: -trade_board_size / 2. + drop_size / 2 as f32,
-                        y: trade_board_size / 2. - drop_size / 2. - drop_size * i as f32,
-                        z: 0.1,
-                    };
-                    spawn_children.set_config(config.clone());
-                    spawn_children.translate(translate);
-                    spawn_children.image(res.clone(), size);
-                    spawn_children.translate(Vec3 {
-                        x: 0.0,
-                        y: 0.0,
-                        z: 0.1,
-                    });
-                    spawn_children.image(
-                        img_store.number_img[(catan.players[catan.me].inner.resources
-                            [*kind as usize])
-                            .min(20)]
-                        .clone(),
-                        Vec2::new(size.x * 0.5, size.y * 0.5),
-                    );
-                    //add
-                    spawn_children.set_config(config.clone());
-                    spawn_children.translate(
-                        Vec3 {
-                            x: drop_size,
-                            y: drop_size / 4.,
-                            z: 0.,
-                        } + translate,
-                    );
-                    spawn_children.image(
-                        img_store.add.clone(),
-                        Vec2::new(size.x * 0.5, size.y * 0.5),
-                    );
-                    let add_translate = spawn_children.transform.translation;
-
-                    //sub
-                    spawn_children.set_config(config.clone());
-                    spawn_children.translate(
-                        Vec3 {
-                            x: drop_size,
-                            y: -drop_size / 4.,
-                            z: 0.,
-                        } + translate,
-                    );
-                    spawn_children.image(
-                        img_store.sub.clone(),
-                        Vec2::new(size.x * 0.5, size.y * 0.5),
-                    );
-                    let sub_translate = spawn_children.transform.translation;
-                    drop_board
-                        .draw
-                        .drop
-                        .insert(*kind, (add_translate, sub_translate));
-
-                    //count
-                    spawn_children.set_config(config.clone());
-                    spawn_children.translate(
-                        Vec3 {
-                            x: drop_size * 1.25,
-                            y: 0.,
-                            z: 0.1,
-                        } + translate,
-                    );
-                    spawn_children.image(
-                        img_store.number_img
-                            [(drop_board.resource.drop[*kind as usize] as usize).min(20)]
-                        .clone(),
-                        Vec2::new(size.x * 0.5, size.y * 0.5),
-                    );
-                    drop_board.draw.button_size = drop_size * 0.25;
-                    i += 1;
-                }
-                if drop_board.resource.drop.iter().sum::<u8>() as usize == catan.drop_cnt
-                {
-                    spawn_children.set_config(config.clone());
-                    spawn_children.translate(Vec3 {
-                        x: 0.,
-                        y: -drop_size, // * 2.,
-                        z: 0.1,
-                    });
-                    spawn_children
-                        .image(img_store.yes.clone(), Vec2::new(drop_size, drop_size));
-                    drop_board.draw.yes = spawn_children.transform.translation;
-                    drop_board.draw.yes.z = drop_size / 2.;
-                }
-            });
+        drop.single_mut().1.custom_size =
+            Some(Vec2::new(trade_board_size, trade_board_size));
+        let trade_size = trade_board_size
+            / catan.players[catan.me]
+                .inner
+                .resources
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| TileKind::try_from(*i as u8).unwrap().is_resource())
+                .count() as f32;
+        let mut i = 0;
+        for j in 0..catan.players[catan.me].inner.resources.len() {
+            let kind = &TileKind::try_from(j as u8).unwrap();
+            if !kind.is_resource() {
+                continue;
+            }
+            drop_board.draw.drop.insert(
+                *kind,
+                Vec3 {
+                    x: -trade_board_size / 2. + trade_size / 2 as f32,
+                    y: trade_board_size / 2. - trade_size / 2. - trade_size * i as f32,
+                    z: 0.1,
+                },
+            );
+            i += 1;
+        }
+        drop_board.draw.drop_size = trade_size;
+        drop_board.draw.button_size = trade_size / 4.0;
     }
+}
+
+fn spawn_drop_resource(
+    command: &mut ChildBuilder, kind: TileKind, img_store: &Res<ImageStore>,
+) {
+    command
+        .spawn((
+            DropResourceMarker { tile: kind },
+            SpriteBundle {
+                texture: img_store.resource_img.get(&kind).unwrap().clone(),
+                transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.1)),
+                ..Default::default()
+            },
+        ))
+        .with_children(|command| {
+            command.spawn((
+                DropResourceCntMarker { tile: kind },
+                SpriteBundle {
+                    texture: img_store.number_img[0].clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.1)),
+                    ..Default::default()
+                },
+            ));
+            command.spawn((
+                DropAddMarker,
+                SpriteBundle {
+                    texture: img_store.add.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.1)),
+                    ..Default::default()
+                },
+            ));
+            command.spawn((
+                DropSubMarker,
+                SpriteBundle {
+                    texture: img_store.sub.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.1)),
+                    ..Default::default()
+                },
+            ));
+            command.spawn((
+                DropResourceDropCntMarker { tile: kind },
+                SpriteBundle {
+                    texture: img_store.number_img[0].clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.1)),
+                    ..Default::default()
+                },
+            ));
+        });
+}
+
+fn despawn_drop(mut commands: Commands, drop: Query<(Entity, &DropMarker)>) {
+    for (entity, _) in drop.iter() {
+        commands.entity(entity).despawn_recursive();
+    }
+}
+
+fn spawn_drop_resources(
+    mut command: Commands, catan: ResMut<Catan>, img_store: Res<ImageStore>,
+) {
+    command
+        .spawn((
+            DropMarker,
+            SpriteBundle {
+                sprite: Sprite {
+                    color: Color::rgba(0.0, 0.0, 0.0, 0.9),
+                    ..Default::default()
+                },
+                transform: Transform::from_translation(Vec3::new(
+                    0.0,
+                    0.0,
+                    TRADEBPARD_LAYER,
+                )),
+                ..Default::default()
+            },
+        ))
+        .with_children(|command| {
+            for j in 0..catan.players[catan.me].inner.resources.len() {
+                let kind = &TileKind::try_from(j as u8).unwrap();
+                if kind.is_resource() {
+                    spawn_drop_resource(command, *kind, &img_store);
+                }
+            }
+
+            command.spawn((
+                DropConfirm,
+                SpriteBundle {
+                    texture: img_store.yes.clone(),
+                    ..Default::default()
+                },
+            ));
+        });
+}
+
+#[derive(Default)]
+struct PickBoardDraw {
+    drop: HashMap<TileKind, Vec3>,
+    drop_size: f32,
+    button_size: f32,
+}
+
+#[derive(Default)]
+struct PickBoardResource {
+    pick: [u8; TileKind::Max as usize],
+}
+
+#[derive(Resource, Default)]
+struct PickBoard {
+    draw: PickBoardDraw,
+    resource: PickBoardResource,
+}
+
+impl PickBoard {
+    fn clear(&mut self) {
+        self.resource = PickBoardResource::default();
+        self.draw = PickBoardDraw::default();
+    }
+}
+
+#[derive(Component)]
+struct PickMarker;
+
+#[derive(Component)]
+struct PickResourceMarker {
+    tile: TileKind,
+}
+
+#[derive(Component)]
+struct PickResourceCntMarker {
+    tile: TileKind,
+}
+
+#[derive(Component)]
+struct PickResourcePickCntMarker {
+    tile: TileKind,
+}
+
+#[derive(Component)]
+struct PickAddMarker;
+
+#[derive(Component)]
+struct PickSubMarker;
+
+#[derive(Component)]
+struct PickConfirm;
+
+fn check_pick_click(
+    windows: Query<&Window>, mouse_button_input: Res<ButtonInput<MouseButton>>,
+    mut pick_board: ResMut<PickBoard>, mut catan: ResMut<Catan>,
+    mut next_state: ResMut<NextState<CatanState>>,
+    mut action_writer: ConsumableEventWriter<GameAction>,
+) {
+    if mouse_button_input.just_pressed(MouseButton::Left) {
+        // convert the mouse position to the window position
+        if let Some(mouse) = windows.iter().next().unwrap().cursor_position() {
+            let x = mouse.x - windows.iter().next().unwrap().width() / 2.;
+            let y = -(mouse.y - windows.iter().next().unwrap().height() / 2.);
+
+            for (kind, translate) in pick_board.draw.drop.iter() {
+                if x > translate.x + pick_board.draw.drop_size
+                    - pick_board.draw.button_size
+                    && x < translate.x
+                        + pick_board.draw.drop_size
+                        + pick_board.draw.button_size
+                    && y > translate.y + pick_board.draw.drop_size / 4.0
+                        - pick_board.draw.button_size
+                    && y < translate.y
+                        + pick_board.draw.drop_size / 4.0
+                        + pick_board.draw.button_size
+                {
+                    let k = kind.clone();
+
+                    pick_board.resource.pick[k as usize] += 1;
+                    pick_board.resource.pick[k as usize] =
+                        pick_board.resource.pick[k as usize].min(20);
+
+                    return;
+                }
+                if x > translate.x + pick_board.draw.drop_size
+                    - pick_board.draw.button_size
+                    && x < translate.x
+                        + pick_board.draw.drop_size
+                        + pick_board.draw.button_size
+                    && y > translate.y
+                        - pick_board.draw.drop_size / 4.0
+                        - pick_board.draw.button_size
+                    && y < translate.y - pick_board.draw.drop_size / 4.0
+                        + pick_board.draw.button_size
+                {
+                    let k = kind.clone();
+                    pick_board.resource.pick[k as usize] =
+                        pick_board.resource.pick[k as usize].saturating_sub(1);
+                    return;
+                }
+
+                if x > -pick_board.draw.drop_size / 2.0
+                    && x < pick_board.draw.drop_size / 2.0
+                    && y > pick_board.draw.drop_size
+                    && y < pick_board.draw.drop_size * 2.0
+                    && pick_board.resource.pick.iter().sum::<u8>() as usize
+                        == catan.pick_cnt
+                {
+                    action_writer.send(
+                        GameAct::PickResource(
+                            pick_board
+                                .resource
+                                .pick
+                                .iter()
+                                .enumerate()
+                                .map(|(i, count)| {
+                                    (
+                                        TileKind::try_from(i as u8).unwrap(),
+                                        *count as usize,
+                                    )
+                                })
+                                .collect(),
+                        )
+                        .into(),
+                    );
+                    if catan.current_turn == catan.me {
+                        next_state.set(CatanState::Menu);
+                    } else {
+                        next_state.set(CatanState::Wait);
+                    }
+                    pick_board.clear();
+                    catan.pick_cnt = 0;
+                    return;
+                }
+            }
+        }
+    }
+}
+
+fn update_pick_confirm_spawn(
+    mut resources: Query<(&mut Transform, &mut Sprite, &mut Visibility, &PickConfirm)>,
+    pick_board: Res<PickBoard>, catan: Res<Catan>,
+) {
+    let (mut transform, mut sprite, mut visibility, _) = resources.single_mut();
+    transform.translation = Vec3::new(0.0, pick_board.draw.drop_size * 1.5, 0.1);
+    sprite.custom_size = Some(Vec2::new(
+        pick_board.draw.drop_size,
+        pick_board.draw.drop_size,
+    ));
+    if pick_board.resource.pick.iter().sum::<u8>() as usize == catan.pick_cnt {
+        *visibility = Visibility::Visible;
+    } else {
+        *visibility = Visibility::Hidden;
+    }
+}
+
+fn update_pick_resource_pick_cnt_marker_spawn(
+    mut resources: Query<(
+        &mut Transform,
+        &mut Sprite,
+        &mut Handle<Image>,
+        &PickResourcePickCntMarker,
+    )>,
+    pick_board: Res<PickBoard>, img_store: Res<ImageStore>,
+) {
+    for (mut transform, mut sprite, mut img, res) in resources.iter_mut() {
+        transform.translation = Vec3 {
+            x: pick_board.draw.drop_size * 1.25,
+            y: 0.,
+            z: 0.1,
+        };
+        *img = img_store.number_img[pick_board.resource.pick[res.tile as usize] as usize]
+            .clone();
+
+        sprite.custom_size = Some(Vec2::new(
+            pick_board.draw.drop_size * 0.5,
+            pick_board.draw.drop_size * 0.5,
+        ));
+    }
+}
+
+fn update_pick_resource_sub_marker_spawn(
+    mut resources: Query<(&mut Transform, &mut Sprite, &PickSubMarker)>,
+    pick_board: Res<PickBoard>,
+) {
+    for (mut transform, mut sprite, _) in resources.iter_mut() {
+        transform.translation = Vec3 {
+            x: pick_board.draw.drop_size,
+            y: -pick_board.draw.drop_size / 4.,
+            z: 0.,
+        };
+
+        sprite.custom_size = Some(Vec2::new(
+            pick_board.draw.drop_size * 0.5,
+            pick_board.draw.drop_size * 0.5,
+        ));
+    }
+}
+
+fn update_pick_resource_add_marker_spawn(
+    mut resources: Query<(&mut Transform, &mut Sprite, &PickAddMarker)>,
+    pick_board: Res<PickBoard>,
+) {
+    for (mut transform, mut sprite, _) in resources.iter_mut() {
+        transform.translation = Vec3 {
+            x: pick_board.draw.drop_size,
+            y: pick_board.draw.drop_size / 4.,
+            z: 0.,
+        };
+
+        sprite.custom_size = Some(Vec2::new(
+            pick_board.draw.drop_size * 0.5,
+            pick_board.draw.drop_size * 0.5,
+        ));
+    }
+}
+
+fn update_pick_resource_cnt_marker_spawn(
+    mut resources: Query<(&mut Sprite, &mut Handle<Image>, &PickResourceCntMarker)>,
+    pick_board: Res<PickBoard>, catan: Res<Catan>, img_store: Res<ImageStore>,
+) {
+    for (mut sprite, mut img, res) in resources.iter_mut() {
+        *img = img_store.number_img
+            [catan.players[catan.me].inner.resources[res.tile as usize] as usize]
+            .clone();
+        sprite.custom_size = Some(Vec2::new(
+            pick_board.draw.drop_size * 0.5,
+            pick_board.draw.drop_size * 0.5,
+        ));
+    }
+}
+
+fn update_pick_resource_marker_spawn(
+    mut resources: Query<(&mut Transform, &mut Sprite, &PickResourceMarker)>,
+    pick_board: Res<PickBoard>,
+) {
+    for (mut transform, mut sprite, res) in resources.iter_mut() {
+        transform.translation = pick_board.draw.drop[&res.tile];
+        sprite.custom_size = Some(Vec2::new(
+            pick_board.draw.drop_size,
+            pick_board.draw.drop_size,
+        ));
+    }
+}
+
+fn update_pick_resource_spawn(
+    mut drop: Query<(&mut Transform, &mut Sprite, &PickMarker)>, windows: Query<&Window>,
+    catan: Res<Catan>, mut pick_board: ResMut<PickBoard>,
+) {
+    for window in windows.iter() {
+        let trade_board_size = window.width().min(window.height()) * 0.8;
+
+        drop.single_mut().1.custom_size =
+            Some(Vec2::new(trade_board_size, trade_board_size));
+        let trade_size = trade_board_size
+            / catan.players[catan.me]
+                .inner
+                .resources
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| TileKind::try_from(*i as u8).unwrap().is_resource())
+                .count() as f32;
+        let mut i = 0;
+        for j in 0..catan.players[catan.me].inner.resources.len() {
+            let kind = &TileKind::try_from(j as u8).unwrap();
+            if !kind.is_resource() {
+                continue;
+            }
+            pick_board.draw.drop.insert(
+                *kind,
+                Vec3 {
+                    x: -trade_board_size / 2. + trade_size / 2 as f32,
+                    y: trade_board_size / 2. - trade_size / 2. - trade_size * i as f32,
+                    z: 0.1,
+                },
+            );
+            i += 1;
+        }
+        pick_board.draw.drop_size = trade_size;
+        pick_board.draw.button_size = trade_size / 4.0;
+    }
+}
+
+fn spawn_pick_resource(
+    command: &mut ChildBuilder, kind: TileKind, img_store: &Res<ImageStore>,
+) {
+    command
+        .spawn((
+            PickResourceMarker { tile: kind },
+            SpriteBundle {
+                texture: img_store.resource_img.get(&kind).unwrap().clone(),
+                transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.1)),
+                ..Default::default()
+            },
+        ))
+        .with_children(|command| {
+            command.spawn((
+                PickResourceCntMarker { tile: kind },
+                SpriteBundle {
+                    texture: img_store.number_img[0].clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.1)),
+                    ..Default::default()
+                },
+            ));
+            command.spawn((
+                PickAddMarker,
+                SpriteBundle {
+                    texture: img_store.add.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.1)),
+                    ..Default::default()
+                },
+            ));
+            command.spawn((
+                PickSubMarker,
+                SpriteBundle {
+                    texture: img_store.sub.clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.1)),
+                    ..Default::default()
+                },
+            ));
+            command.spawn((
+                PickResourcePickCntMarker { tile: kind },
+                SpriteBundle {
+                    texture: img_store.number_img[0].clone(),
+                    transform: Transform::from_translation(Vec3::new(0.0, 0.0, 0.1)),
+                    ..Default::default()
+                },
+            ));
+        });
+}
+
+fn despawn_pick(mut commands: Commands, drop: Query<(Entity, &PickMarker)>) {
+    for (entity, _) in drop.iter() {
+        commands.entity(entity).despawn_recursive();
+    }
+}
+
+fn spawn_pick_resources(
+    mut command: Commands, catan: ResMut<Catan>, img_store: Res<ImageStore>,
+) {
+    command
+        .spawn((
+            PickMarker,
+            SpriteBundle {
+                sprite: Sprite {
+                    color: Color::rgba(0.0, 0.0, 0.0, 0.9),
+                    ..Default::default()
+                },
+                transform: Transform::from_translation(Vec3::new(
+                    0.0,
+                    0.0,
+                    TRADEBPARD_LAYER,
+                )),
+                ..Default::default()
+            },
+        ))
+        .with_children(|command| {
+            for j in 0..catan.players[catan.me].inner.resources.len() {
+                let kind = &TileKind::try_from(j as u8).unwrap();
+                if kind.is_resource() {
+                    spawn_pick_resource(command, *kind, &img_store);
+                }
+            }
+
+            command.spawn((
+                PickConfirm,
+                SpriteBundle {
+                    texture: img_store.yes.clone(),
+                    ..Default::default()
+                },
+            ));
+        });
 }
 
 #[derive(Default, Resource)]
@@ -3032,6 +3823,7 @@ struct ImageStore {
     resource_img: HashMap<TileKind, Handle<Image>>,
     number_img: [Handle<Image>; 21],
     road_img: [Handle<Image>; 4],
+    boat_img: [Handle<Image>; 4],
     settlement_img: [Handle<Image>; 4],
     city_img: [Handle<Image>; 4],
     bank_img: Handle<Image>,
@@ -3090,6 +3882,14 @@ fn load_img(
         TileKind::Dessert,
         asset_server.load(platform.load_asset("catan/dessert.png")),
     );
+    image_store.resource_img.insert(
+        TileKind::Gold,
+        asset_server.load(platform.load_asset("catan/gold.png")),
+    );
+    image_store.resource_img.insert(
+        TileKind::Ocean,
+        asset_server.load(platform.load_asset("catan/ocean.png")),
+    );
 
     for i in 0..image_store.number_img.len() {
         image_store.number_img[i] =
@@ -3099,6 +3899,11 @@ fn load_img(
     for i in 0..image_store.road_img.len() {
         image_store.road_img[i] = asset_server
             .load(platform.load_asset(format!("catan/road_{}.png", i).as_str()));
+    }
+
+    for i in 0..image_store.boat_img.len() {
+        image_store.boat_img[i] = asset_server
+            .load(platform.load_asset(format!("catan/boat_{}.png", i).as_str()));
     }
 
     for i in 0..image_store.settlement_img.len() {
@@ -3194,6 +3999,12 @@ fn loading(
         }
     }
 
+    for image in img_store.boat_img.iter() {
+        if !image_ready(&asset_server, image.clone()) {
+            return;
+        }
+    }
+
     for image in img_store.card_img.iter() {
         if !image_ready(&asset_server, image.clone()) {
             return;
@@ -3243,6 +4054,7 @@ fn loading(
                 let settlment_img = img_store.settlement_img[catan.me as usize].clone();
                 let city_img = img_store.city_img[catan.me as usize].clone();
                 let road_img = img_store.road_img[catan.me as usize].clone();
+                let boat_img = img_store.boat_img[catan.me as usize].clone();
 
                 img_store
                     .operation_img
@@ -3253,6 +4065,9 @@ fn loading(
                 img_store
                     .operation_img
                     .insert(Operation::BuildRoad, road_img);
+                img_store
+                    .operation_img
+                    .insert(Operation::BuildBoat, boat_img);
 
                 spawn_catan_tiles(&mut commands, &mut catan, &img_store);
                 spawn_catan_resources(&mut commands, &mut catan, &img_store);
@@ -3364,6 +4179,23 @@ fn process_event(
                         &mut commands,
                         build.road,
                         img_store.road_img[build.player].clone(),
+                    );
+                },
+                GameMsg::PlayerBuildBoat(build) => {
+                    catan.inner.add_boat(build.player, build.road);
+                    catan.players[build.player].inner.add_boat(build.road);
+                    if build.player != catan.me {
+                        let _ = catan.players[build.player].inner.resources
+                            [TileKind::Wool as usize]
+                            .saturating_sub(1);
+                        let _ = catan.players[build.player].inner.resources
+                            [TileKind::Wood as usize]
+                            .saturating_sub(1);
+                    }
+                    spawn_catan_boat(
+                        &mut commands,
+                        build.road,
+                        img_store.boat_img[build.player].clone(),
                     );
                 },
                 GameMsg::PlayerBuildSettlement(build) => {
@@ -3545,12 +4377,16 @@ fn process_event(
                 },
                 GameMsg::PlayerEndTurn(_) => {},
                 GameMsg::PlayerOfferResources(offer) => {
-                    catan.players[offer.player].inner.resources[offer.kind as usize] =
-                        (catan.players[offer.player].inner.resources[offer.kind as usize]
-                            as isize
-                            + offer.count)
-                            .min(20)
-                            .max(0) as usize;
+                    if offer.kind.is_resource() {
+                        catan.players[offer.player].inner.resources
+                            [offer.kind as usize] =
+                            (catan.players[offer.player].inner.resources
+                                [offer.kind as usize]
+                                as isize
+                                + offer.count)
+                                .min(20)
+                                .max(0) as usize;
+                    }
                 },
                 GameMsg::PlayerStartSelectRobber() => {
                     if catan.current_turn == catan.me {
@@ -3561,6 +4397,13 @@ fn process_event(
                     if player == catan.me {
                         catan.drop_cnt = count;
                         next_state.set(CatanState::DropResource);
+                        break;
+                    }
+                },
+                GameMsg::PlayerPickResources((player, count)) => {
+                    if player == catan.me {
+                        catan.pick_cnt = count;
+                        next_state.set(CatanState::PickResource);
                         break;
                     }
                 },
@@ -3603,6 +4446,7 @@ fn client_process_event(
             },
             NetworkClientEvent::Msg(message) => match message {
                 boardgame_common::network::ServerMsg::Catan(msg) => {
+                    info!("server message: {:?}", msg);
                     event_writer.send(msg.into());
                 },
                 _ => {
@@ -3623,6 +4467,7 @@ fn update_operation_visibility(
         | CatanState::BuidSettlement
         | CatanState::BuildCity
         | CatanState::BuildRoad
+        | CatanState::BuildBoat
         | CatanState::Trade
         | CatanState::UseDevelopmentCard => {
             for mut vis in operations.iter_mut() {
@@ -3635,6 +4480,33 @@ fn update_operation_visibility(
             }
         },
     }
+}
+
+#[derive(Component, Debug, Default)]
+struct Background;
+
+fn update_background_spawn(
+    mut background: Query<(&mut Sprite, &Background)>, windows: Query<&Window>,
+) {
+    for window in windows.iter() {
+        for (mut sprite, _) in background.iter_mut() {
+            sprite.custom_size = Some(Vec2::new(window.width(), window.height()));
+        }
+    }
+}
+
+fn spawn_backgounrd(mut commands: Commands) {
+    commands.spawn((
+        Background,
+        SpriteBundle {
+            sprite: Sprite {
+                color: Color::rgba(0.0, 128.0, 255.0, 0.1),
+                ..Default::default()
+            },
+            transform: Transform::from_translation(Vec3::new(0.0, 0.0, -0.1)),
+            ..Default::default()
+        },
+    ));
 }
 
 pub fn catan_run() {
@@ -3663,6 +4535,7 @@ pub fn catan_run() {
         .insert_resource(ImageStore::default())
         .insert_resource(TradeBoard::default())
         .insert_resource(DropBoard::default())
+        .insert_resource(PickBoard::default())
         .add_plugins((
             #[cfg(target_family = "wasm")]
             WebAssetPlugin::default(),
@@ -3679,8 +4552,8 @@ pub fn catan_run() {
             }),
         ))
         .add_plugins(bevy_framepace::FramepacePlugin)
-        .add_plugins(Shape2dPlugin::default())
         .add_systems(Startup, limit_frame)
+        .add_systems(Startup, spawn_backgounrd)
         .add_systems(Startup, load_img)
         .add_systems(Update, client_process_event)
         .add_systems(Update, loading.run_if(in_state(CatanLoadState::Loading)))
@@ -3688,14 +4561,16 @@ pub fn catan_run() {
             Update,
             intialize_game.run_if(in_state(CatanLoadState::Initialzing)),
         )
-        .add_systems(OnEnter(CatanState::InitRoad), spawn_initable_roads)
-        .add_systems(OnExit(CatanState::InitRoad), despawn_buildable_roads)
-        .add_systems(OnEnter(UseCardState::RoadBuilding), spawn_buildable_roads)
-        .add_systems(OnExit(UseCardState::RoadBuilding), despawn_buildable_roads)
-        .add_systems(OnEnter(CatanState::BuildRoad), spawn_buildable_roads)
-        .add_systems(OnExit(CatanState::BuildRoad), despawn_buildable_roads)
+        .add_systems(OnEnter(CatanState::InitRoad), spawn_initable_paths)
+        .add_systems(OnExit(CatanState::InitRoad), despawn_buildable_paths)
+        .add_systems(OnEnter(UseCardState::RoadBuilding), spawn_buildable_paths)
+        .add_systems(OnExit(UseCardState::RoadBuilding), despawn_buildable_paths)
+        .add_systems(OnEnter(CatanState::BuildRoad), spawn_buildable_paths)
+        .add_systems(OnExit(CatanState::BuildRoad), despawn_buildable_paths)
         .add_systems(OnEnter(CatanState::Trade), spawn_trade)
         .add_systems(OnExit(CatanState::Trade), despawn_trade)
+        .add_systems(OnEnter(CatanState::BuildBoat), spawn_buildable_paths)
+        .add_systems(OnExit(CatanState::BuildBoat), despawn_buildable_paths)
         .add_systems(
             OnEnter(CatanState::UseDevelopmentCard),
             spawn_use_development_card,
@@ -3708,9 +4583,24 @@ pub fn catan_run() {
             OnExit(CatanState::UseDevelopmentCard),
             despawn_use_development_card,
         )
+        .add_systems(OnEnter(CatanState::Stealing), spawn_steal_target)
+        .add_systems(OnExit(CatanState::Stealing), despawn_steal_target)
+        .add_systems(OnEnter(UseCardState::Monopoly), spawn_monopoly)
+        .add_systems(OnExit(UseCardState::Monopoly), despawn_monopoly)
+        .add_systems(OnEnter(UseCardState::YearOfPlenty), spawn_year_of_plenty)
+        .add_systems(OnExit(UseCardState::YearOfPlenty), despawn_year_of_plenty)
+        .add_systems(OnEnter(CatanState::DropResource), spawn_drop_resources)
+        .add_systems(OnExit(CatanState::DropResource), despawn_drop)
+        .add_systems(OnEnter(CatanState::PickResource), spawn_pick_resources)
+        .add_systems(OnExit(CatanState::PickResource), despawn_pick)
+        .add_systems(OnEnter(CatanState::BoatRoadBuild), spawn_road_boat_select)
+        .add_systems(OnExit(CatanState::BoatRoadBuild), despawn_road_boat_select)
+        .add_systems(OnEnter(CatanState::BoatRoadInit), spawn_road_boat_select)
+        .add_systems(OnExit(CatanState::BoatRoadInit), despawn_road_boat_select)
         .add_systems(
             Update,
             (
+                update_background_spawn,
                 process_action,
                 process_event,
                 update_operation_visibility.run_if(in_state(CatanLoadState::Loaded)),
@@ -3726,31 +4616,71 @@ pub fn catan_run() {
                     (
                         update_catan_tiles_transform,
                         update_catan_tiles_spawn,
+                        update_catan_tiles_number_spawn,
                         update_catan_points_spawn,
                         update_catan_harbor_spawn,
                         update_catan_robber_spawn,
                         update_catan_road_spawn,
-                        update_buildable_roads_spawn,
+                        update_catan_boat_spawn,
+                        update_buildable_paths_spawn,
                     )
                         .chain(),
                 ),
                 check_init_settlement.run_if(in_state(CatanState::InitSettlement)),
-                check_init_road.run_if(in_state(CatanState::InitRoad)),
-                check_build_road.run_if(in_state(CatanState::BuildRoad)),
+                check_init_path.run_if(in_state(CatanState::InitRoad)),
+                check_build_path.run_if(in_state(CatanState::BuildRoad)),
+                check_build_path.run_if(in_state(CatanState::BuildBoat)),
                 check_build_settlement.run_if(in_state(CatanState::BuidSettlement)),
                 check_build_city.run_if(in_state(CatanState::BuildCity)),
                 check_select_robber.run_if(in_state(CatanState::SelectRobber)),
                 check_steal_target.run_if(in_state(CatanState::Stealing)),
-                (draw_drop_resource, check_drop_click)
+                (
+                    update_drop_resource_spawn,
+                    update_drop_resource_marker_spawn,
+                    update_drop_resource_cnt_marker_spawn,
+                    update_drop_resource_add_marker_spawn,
+                    update_drop_resource_sub_marker_spawn,
+                    update_drop_resource_drop_cnt_marker_spawn,
+                    update_drop_confirm_spawn,
+                    check_drop_click,
+                )
+                    .chain()
                     .run_if(in_state(CatanState::DropResource)),
-                draw_steal_target.run_if(in_state(CatanState::Stealing)),
+                (
+                    update_pick_resource_spawn,
+                    update_pick_resource_marker_spawn,
+                    update_pick_resource_cnt_marker_spawn,
+                    update_pick_resource_add_marker_spawn,
+                    update_pick_resource_sub_marker_spawn,
+                    update_pick_resource_pick_cnt_marker_spawn,
+                    update_pick_confirm_spawn,
+                    check_pick_click,
+                )
+                    .chain()
+                    .run_if(in_state(CatanState::PickResource)),
+                (
+                    (
+                        update_road_boat_select,
+                        update_road_boat_select_opt,
+                        check_boat_road_select,
+                    )
+                        .run_if(in_state(CatanState::BoatRoadBuild)),
+                    (
+                        update_road_boat_select,
+                        update_road_boat_select_opt,
+                        check_boat_road_select,
+                    )
+                        .run_if(in_state(CatanState::BoatRoadInit)),
+                ),
+                update_steal_target_spawn.run_if(in_state(CatanState::Stealing)),
                 check_menu_click
                     .run_if(not(in_state(CatanState::Wait)))
                     .run_if(not(in_state(CatanState::InitRoad)))
                     .run_if(not(in_state(CatanState::InitSettlement)))
                     .run_if(not(in_state(CatanState::SelectRobber)))
                     .run_if(not(in_state(CatanState::Stealing)))
-                    .run_if(not(in_state(CatanState::DropResource))),
+                    .run_if(not(in_state(CatanState::DropResource)))
+                    .run_if(not(in_state(CatanState::PickResource))),
                 (
                     (
                         update_trade_spawn,
@@ -3777,9 +4707,9 @@ pub fn catan_run() {
                         check_development_card_click,
                     )
                         .run_if(in_state(UseCardState::SelectCard)),
-                    (draw_monopoly, check_monopoly_click)
+                    (update_monopoly_spawn, check_monopoly_click)
                         .run_if(in_state(UseCardState::Monopoly)),
-                    (draw_year_of_plenty, check_year_of_plenty_click)
+                    (update_year_of_plenty_spawn, check_year_of_plenty_click)
                         .run_if(in_state(UseCardState::YearOfPlenty)),
                     check_knight_select_robber.run_if(in_state(UseCardState::Knight)),
                     check_knight_steal_target
